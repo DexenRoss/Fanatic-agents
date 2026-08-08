@@ -12,8 +12,20 @@ import typer
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
+
+from fanatic_agents.agents.developer import (
+    DeveloperAgentError,
+    DeveloperAssessment,
+    run_developer_assessment,
+)
 
 from fanatic_agents.core.config import ConfigLoadError, load_project_config
+from fanatic_agents.git.inspection import (
+    RepositoryInspectionError,
+    RepositoryInspector,
+    RepositorySnapshot,
+)
 
 
 app = typer.Typer(
@@ -111,6 +123,103 @@ def validate_config(
         f"([bold]{project_config.project.name}[/bold])"
     )
 
+
+@app.command("inspect")
+def inspect_repository(
+    repository: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=True,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Repository directory to inspect in read-only mode.",
+    ),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Request one read-only Developer Agent assessment (may incur API cost).",
+    ),
+) -> None:
+    """Inspect a repository locally, with optional bounded AI analysis."""
+    try:
+        snapshot = RepositoryInspector().inspect(repository)
+    except RepositoryInspectionError as exc:
+        console.print("[red]Repository inspection failed:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+
+    _render_repository_snapshot(snapshot)
+    if not ai:
+        console.print("\n[bold]AI Analysis[/bold]        [yellow]NOT REQUESTED[/yellow]")
+        return
+
+    if not os.environ.get("OPENAI_API_KEY", "").strip():
+        console.print(
+            "\n[red]AI analysis requires OPENAI_API_KEY; no API request was made.[/red]"
+        )
+        raise typer.Exit(code=1)
+    if not snapshot.has_agent_context():
+        console.print(
+            "\n[red]The repository snapshot is empty; no API request was made.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        assessment = run_developer_assessment(snapshot)
+    except DeveloperAgentError as exc:
+        console.print("\n[red]AI analysis failed:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+    _render_developer_assessment(assessment)
+
+
+def _render_repository_snapshot(snapshot: RepositorySnapshot) -> None:
+    table = Table(title="Fanatic Agents Repository Inspection", show_header=False)
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+    branch = "DETACHED HEAD" if snapshot.detached_head else snapshot.current_branch or "N/A"
+    working_tree = (
+        "N/A"
+        if snapshot.working_tree_clean is None
+        else "CLEAN" if snapshot.working_tree_clean else "DIRTY"
+    )
+    table.add_row("Repository", Text(snapshot.repository_name))
+    table.add_row("Git", "YES" if snapshot.is_git_repository else "NO")
+    table.add_row("Branch", branch)
+    table.add_row("Working tree", working_tree)
+    console.print(table)
+    _render_list("Detected technologies", snapshot.detected_technologies)
+    _render_list("Important files", snapshot.important_files)
+    _render_list("Testing commands", snapshot.inferred_test_commands)
+    _render_list("Build commands", snapshot.inferred_build_commands)
+    truncation = snapshot.truncation
+    if truncation.relevant_files_omitted or truncation.content_files_omitted:
+        console.print(
+            "\n[yellow]Snapshot bounded:[/yellow] "
+            f"{truncation.relevant_files_omitted} paths and "
+            f"{truncation.content_files_omitted} content files omitted."
+        )
+
+
+def _render_developer_assessment(assessment: DeveloperAssessment) -> None:
+    console.print("\n[bold cyan]Developer Agent Assessment[/bold cyan]")
+    console.print("\n[bold]Summary[/bold]")
+    console.print(Text(assessment.summary))
+    console.print("\n[bold]Architecture[/bold]")
+    console.print(Text(assessment.architecture))
+    _render_list("Key components", assessment.key_components)
+    _render_list("Risks", assessment.risks)
+    _render_list("Recommended tasks", assessment.recommended_tasks)
+    _render_list("Testing notes", assessment.testing_notes)
+    console.print(f"\n[bold]Readiness[/bold]\n{assessment.readiness}")
+
+
+def _render_list(title: str, items: list[str]) -> None:
+    console.print(f"\n[bold]{title}[/bold]")
+    if not items:
+        console.print("- None detected")
+        return
+    for item in items:
+        console.print(Text(f"- {item}"))
 
 if __name__ == "__main__":
     app()
