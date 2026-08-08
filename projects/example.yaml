@@ -1,0 +1,34 @@
+project:
+  name: example-project
+
+repository:
+  path: /workspace/example
+  main_branch: main
+
+commands:
+  setup:
+    - echo "setup"
+  test:
+    - echo "tests"
+  build:
+    - echo "build"
+
+limits:
+  max_tasks_per_day: 5
+  max_runtime_minutes: 90
+  max_daily_cost_usd: 5.0
+  max_iterations_per_task: 6
+
+permissions:
+  read_repository: true
+  create_branch: true
+  modify_files: true
+  run_commands: true
+  commit: true
+  push_branch: true
+  create_pull_request: true
+  merge: false
+  production_deploy: false
+  modify_secrets: false
+  destructive_database_changes: false
+
