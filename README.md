@@ -87,6 +87,31 @@ Ejecuta la suite de tests:
 python -m pytest
 ```
 
+### Sandbox Docker experimental
+
+Comprueba que la CLI de Docker esta instalada y que el daemon responde:
+
+```bash
+fanatic-agents sandbox check
+```
+
+Ejecuta manualmente un comando permitido:
+
+```bash
+fanatic-agents sandbox run . \
+  --image python:3.12-slim \
+  --command "python --version"
+```
+
+La imagen debe existir localmente. Fanatic Agents nunca ejecuta `docker pull`: debes descargar o construir la imagen explicitamente antes de usarla.
+
+El sandbox trabaja exclusivamente sobre una copia temporal, filtrada y acotada del repositorio. El repositorio original no se monta en el contenedor y no recibe los cambios efectuados durante la ejecucion. Se excluyen `.git`, entornos virtuales, dependencias, artefactos generados, symlinks, binarios y nombres de archivo que puedan contener credenciales, incluidos `.env`, `.env.*`, claves y tokens.
+
+La red permanece deshabilitada. El contenedor usa limites conservadores de tiempo, memoria, CPU, procesos y salida; elimina capabilities, activa `no-new-privileges`, usa un root filesystem de solo lectura y recibe unicamente `HOME=/tmp` y `PYTHONDONTWRITEBYTECODE=1`. No se montan sockets, configuraciones personales ni credenciales, y `OPENAI_API_KEY` no se pasa al contenedor.
+
+Esta funcionalidad es experimental. El Developer Agent continua sin tools y no tiene acceso al sandbox; Sprint 2 solo permite invocarlo manualmente desde la CLI o la API Python.
+
+
 ## Configuración
 
 Las configuraciones YAML se validan estrictamente: no se aceptan campos desconocidos, tipos implícitos incorrectos ni límites menores o iguales que cero. Consulta [`projects/example.yaml`](projects/example.yaml) como referencia.

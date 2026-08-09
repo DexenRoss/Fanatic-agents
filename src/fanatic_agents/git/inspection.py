@@ -13,6 +13,11 @@ from typing import Any
 import yaml
 from pydantic import Field
 
+from fanatic_agents.core.path_safety import (
+    EXCLUDED_DIRECTORY_NAMES,
+    SECRET_NAME_TOKENS,
+    SECRET_SUFFIXES,
+)
 from fanatic_agents.core.project import StrictModel
 
 MAX_RELEVANT_FILES = 200
@@ -23,14 +28,7 @@ MAX_TOTAL_CHARACTERS = 50_000
 GIT_COMMAND_TIMEOUT_SECONDS = 5.0
 MAX_CONFIG_FILE_BYTES = 512_000
 
-EXCLUDED_DIRECTORIES = frozenset({
-    ".git", ".venv", "venv", "node_modules", "dist", "build", "coverage",
-    "__pycache__", ".pytest_cache", ".next", ".dart_tool", "target", "vendor",
-})
-SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx"})
-SECRET_NAME_TOKENS = frozenset({
-    "credential", "credentials", "password", "passwd", "secret", "secrets", "token", "tokens",
-})
+EXCLUDED_DIRECTORIES = EXCLUDED_DIRECTORY_NAMES
 
 IMPORTANT_FILE_NAMES = frozenset({
     "agents.md", "readme.md", "pyproject.toml", "requirements.txt", "setup.py",
@@ -446,7 +444,7 @@ def _load_toml_object(root: Path, name: str) -> dict[str, Any]:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return {}
-    
+
 
 def _load_yaml_object(root: Path, name: str) -> dict[str, Any]:
     text = _read_small_text(root, name)

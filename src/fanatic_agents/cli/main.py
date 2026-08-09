@@ -27,6 +27,13 @@ from fanatic_agents.git.inspection import (
     RepositorySnapshot,
 )
 
+from fanatic_agents.sandbox.docker import (
+    check_docker_sandbox,
+    run_sandbox_command,
+)
+from fanatic_agents.sandbox.errors import SandboxError
+from fanatic_agents.sandbox.models import SandboxCommandResult
+from fanatic_agents.sandbox.policy import parse_command
 
 app = typer.Typer(
     name="fanatic-agents",
@@ -36,6 +43,8 @@ app = typer.Typer(
 config_app = typer.Typer(help="Validate and inspect project configuration.")
 app.add_typer(config_app, name="config")
 console = Console()
+sandbox_app = typer.Typer(help="Check and run the experimental Docker sandbox.")
+app.add_typer(sandbox_app, name="sandbox")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +131,78 @@ def validate_config(
         f"[green]Configuration is valid:[/green] {file} "
         f"([bold]{project_config.project.name}[/bold])"
     )
+
+
+@sandbox_app.command("check")
+def sandbox_check() -> None:
+    """Check the Docker CLI and daemon without pulling any image."""
+    try:
+        status = check_docker_sandbox()
+    except SandboxError as exc:
+        table = Table(title="Sandbox Check", show_header=False)
+        table.add_column("Component", style="bold")
+        table.add_column("Status")
+        table.add_row("Docker", "[red]UNAVAILABLE[/red]")
+        console.print(table)
+        console.print("\n[red]Sandbox is not ready:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+
+    table = Table(title="Sandbox Check", show_header=False)
+    table.add_column("Component", style="bold")
+    table.add_column("Status")
+    table.add_row("Docker CLI", Text(status.executable))
+    table.add_row("Docker daemon", "[green]AVAILABLE[/green]")
+    console.print(table)
+    console.print("\n[green]Sandbox preflight passed.[/green]")
+
+
+@sandbox_app.command("run")
+def sandbox_run(
+    repository: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=True,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Repository copied into the temporary sandbox workspace.",
+    ),
+    image: str = typer.Option(..., "--image", help="Locally available Docker image."),
+    command_text: str = typer.Option(
+        ...,
+        "--command",
+        help="Command parsed once into argv; shell syntax is rejected.",
+    ),
+) -> None:
+    """Run one allowed command in an isolated copy of a repository."""
+    try:
+        command = parse_command(command_text)
+        result = run_sandbox_command(repository, image, command)
+    except SandboxError as exc:
+        console.print("[red]Sandbox execution failed:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+    _render_sandbox_result(image, result)
+
+
+def _render_sandbox_result(image: str, result: SandboxCommandResult) -> None:
+    table = Table(title="Sandbox Execution", show_header=False)
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+    table.add_row("Image", Text(image))
+    table.add_row("Command", Text(" ".join(result.argv)))
+    exit_code = str(result.exit_code) if result.exit_code is not None else "N/A"
+    table.add_row("Exit code", exit_code)
+    table.add_row("Duration", f"{result.duration_seconds:.3f}s")
+    table.add_row("Timed out", "YES" if result.timed_out else "NO")
+    console.print(table)
+    _render_sandbox_stream("stdout", result.stdout, result.stdout_truncated)
+    _render_sandbox_stream("stderr", result.stderr, result.stderr_truncated)
+
+
+def _render_sandbox_stream(title: str, value: str, truncated: bool) -> None:
+    suffix = " [yellow](truncated)[/yellow]" if truncated else ""
+    console.print(f"\n[bold]{title}[/bold]{suffix}")
+    console.print(Text(value) if value else Text("(empty)"))
 
 
 @app.command("inspect")
