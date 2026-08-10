@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -20,12 +19,19 @@ from fanatic_agents.agents.developer import (
     run_developer_assessment,
 )
 
+from fanatic_agents.agents._shared import (
+    OpenAIConfigurationError,
+    configure_openai_sdk,
+)
 from fanatic_agents.core.config import ConfigLoadError, load_project_config
+from fanatic_agents.core.settings import ApplicationSettings, get_settings
 from fanatic_agents.git.inspection import (
     RepositoryInspectionError,
     RepositoryInspector,
     RepositorySnapshot,
 )
+from fanatic_agents.orchestrator.models import WorkflowResult
+from fanatic_agents.orchestrator.workflow import run_workflow
 
 from fanatic_agents.sandbox.docker import (
     check_docker_sandbox,
@@ -45,6 +51,8 @@ app.add_typer(config_app, name="config")
 console = Console()
 sandbox_app = typer.Typer(help="Check and run the experimental Docker sandbox.")
 app.add_typer(sandbox_app, name="sandbox")
+workflow_app = typer.Typer(help="Plan read-only multi-agent workflows.")
+app.add_typer(workflow_app, name="workflow")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +64,12 @@ class EnvironmentCheck:
     ready: bool
 
 
-def collect_environment_checks() -> list[EnvironmentCheck]:
+def collect_environment_checks(
+    settings: ApplicationSettings | None = None,
+) -> list[EnvironmentCheck]:
     """Inspect local prerequisites without invoking tools or network services."""
 
+    application_settings = settings or get_settings()
     python_version = ".".join(str(part) for part in sys.version_info[:3])
     python_ready = sys.version_info >= (3, 12)
     return [
@@ -71,8 +82,8 @@ def collect_environment_checks() -> list[EnvironmentCheck]:
         _executable_check("Docker", "docker"),
         EnvironmentCheck(
             "OpenAI API Key",
-            "OK" if os.environ.get("OPENAI_API_KEY") else "NOT CONFIGURED",
-            bool(os.environ.get("OPENAI_API_KEY")),
+            "OK" if application_settings.has_openai_api_key else "NOT CONFIGURED",
+            application_settings.has_openai_api_key,
         ),
         _executable_check("GitHub CLI", "gh"),
     ]
@@ -234,7 +245,8 @@ def inspect_repository(
         console.print("\n[bold]AI Analysis[/bold]        [yellow]NOT REQUESTED[/yellow]")
         return
 
-    if not os.environ.get("OPENAI_API_KEY", "").strip():
+    settings = get_settings()
+    if not settings.has_openai_api_key:
         console.print(
             "\n[red]AI analysis requires OPENAI_API_KEY; no API request was made.[/red]"
         )
@@ -246,11 +258,101 @@ def inspect_repository(
         raise typer.Exit(code=1)
 
     try:
+        configure_openai_sdk(settings)
         assessment = run_developer_assessment(snapshot)
-    except DeveloperAgentError as exc:
+    except (DeveloperAgentError, OpenAIConfigurationError) as exc:
         console.print("\n[red]AI analysis failed:[/red]", Text(str(exc)))
         raise typer.Exit(code=1) from exc
     _render_developer_assessment(assessment)
+
+@workflow_app.command("plan")
+def plan_workflow(
+    repository: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=True,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Repository directory to plan against in read-only mode.",
+    ),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Run Planner, Developer Planning, Reviewer, and QA (up to 4 calls).",
+    ),
+) -> None:
+    """Inspect locally and optionally run one read-only workflow pass."""
+    try:
+        snapshot = RepositoryInspector().inspect(repository)
+    except RepositoryInspectionError as exc:
+        console.print("[red]Repository inspection failed:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+
+    if not ai:
+        _render_repository_snapshot(snapshot)
+        console.print("\n[bold]AI workflow:[/bold] [yellow]NOT REQUESTED[/yellow]")
+        console.print("Use --ai to run Planner -> Developer -> Reviewer -> QA.")
+        return
+
+    settings = get_settings()
+    if not settings.has_openai_api_key:
+        console.print(
+            "\n[red]AI workflow requires OPENAI_API_KEY; no agent was called.[/red]"
+        )
+        raise typer.Exit(code=1)
+    if not snapshot.has_agent_context():
+        console.print(
+            "\n[red]The repository snapshot is empty; no agent was called.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        configure_openai_sdk(settings)
+        result = run_workflow(snapshot)
+    except Exception as exc:
+        console.print(
+            "\n[red]AI workflow failed safely; later agents were not called.[/red]"
+        )
+        raise typer.Exit(code=1) from exc
+    _render_workflow_result(result)
+    if result.status == "failed":
+        raise typer.Exit(code=1)
+
+
+def _render_workflow_result(result: WorkflowResult) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Workflow[/bold cyan]")
+    console.print("\n[bold]Repository[/bold]")
+    console.print(Text(result.repository.repository_name))
+
+    if result.planner is not None:
+        console.print("\n[bold]Planner[/bold]")
+        if result.planner.selected_task is not None:
+            task = result.planner.selected_task
+            console.print("Task: ", Text(task.title))
+            console.print(f"Risk: {task.risk_level}")
+        else:
+            console.print("No task selected (insufficient context).")
+
+    if result.developer is not None:
+        console.print("\n[bold]Developer Plan[/bold]")
+        console.print("Approach: ", Text(result.developer.approach))
+        _render_list("Files", result.developer.files_likely_affected)
+
+    if result.reviewer is not None:
+        console.print("\n[bold]Reviewer[/bold]")
+        console.print(f"Decision: {result.reviewer.decision}")
+
+    if result.qa is not None:
+        console.print("\n[bold]QA[/bold]")
+        console.print(f"Readiness: {result.qa.readiness}")
+
+    console.print("\n[bold]Final Status[/bold]")
+    console.print(result.status.upper())
+    if result.stop_reason:
+        console.print("\n[bold]Stop reason:[/bold]")
+        console.print(Text(result.stop_reason))
+
 
 
 def _render_repository_snapshot(snapshot: RepositorySnapshot) -> None:

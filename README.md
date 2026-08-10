@@ -8,7 +8,7 @@ Fanatic Agents es una plataforma experimental para orquestar agentes de IA espec
 - Python 3.12 o posterior
 - `pip`
 - Git, Docker y GitHub CLI (`gh`) son recomendables y se comprueban con `doctor`
-- `OPENAI_API_KEY` solo es necesaria para la opción `inspect --ai`
+- `OPENAI_API_KEY` solo es necesaria para `inspect --ai` y `workflow plan --ai`
 
 ## Instalación
 
@@ -81,6 +81,8 @@ El modelo es opcional; si no se configura, se usa el default actual del Agents S
 export FANATIC_AGENTS_MODEL="..."
 ```
 
+También puedes definir ambas variables en un archivo `.env` del directorio de trabajo, usando `.env.example` como plantilla. Fanatic Agents lo carga automáticamente; las variables exportadas en el entorno tienen precedencia. `.env` permanece ignorado por Git y nunca debe contener valores destinados al repositorio.
+
 Ejecuta la suite de tests:
 
 ```bash
@@ -111,6 +113,34 @@ La red permanece deshabilitada. El contenedor usa limites conservadores de tiemp
 
 Esta funcionalidad es experimental. El Developer Agent continua sin tools y no tiene acceso al sandbox; Sprint 2 solo permite invocarlo manualmente desde la CLI o la API Python.
 
+
+### Orquestación multi-agente read-only (Sprint 3)
+
+La inspección local del workflow no usa OpenAI ni requiere una API key:
+
+```bash
+fanatic-agents workflow plan .
+```
+
+Para ejecutar una sola pasada estructurada de Planner, Developer Planning, Reviewer y QA:
+
+```bash
+export OPENAI_API_KEY="..."
+fanatic-agents workflow plan . --ai
+```
+
+El modelo sigue siendo configurable mediante `FANATIC_AGENTS_MODEL`; no se fija un modelo concreto en código. `--ai` puede realizar como máximo cuatro llamadas al modelo: una por agente. Si un human gate o una condición de parada se activa, los agentes posteriores no se ejecutan. No existen retries, handoffs autónomos ni loops Developer/Reviewer.
+
+Todo el Sprint 3 es read-only:
+
+- los cuatro agentes usan outputs Pydantic y `tools=[]`;
+- ningún agente edita archivos, ejecuta Git, usa GitHub ni accede a secretos;
+- Developer Planning y QA solo proponen comandos como vectores `SandboxCommand`;
+- el Orchestrator valida cada propuesta con `CommandPolicy`, pero nunca la ejecuta;
+- comandos bloqueados, tareas de riesgo alto y decisiones sensibles detienen el workflow;
+- la ejecución del sandbox continúa siendo exclusivamente manual mediante `sandbox run`.
+
+Un resultado `READY_FOR_IMPLEMENTATION` indica que el plan completó sus gates; no significa que se haya aplicado o ejecutado ningún cambio.
 
 ## Configuración
 

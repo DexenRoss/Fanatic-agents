@@ -7,6 +7,8 @@ from typer.testing import CliRunner
 
 from fanatic_agents.cli.main import app
 from fanatic_agents.agents.developer import DeveloperAssessment
+from fanatic_agents.core.settings import ApplicationSettings
+from fanatic_agents.sandbox.models import DockerCheckResult
 
 
 runner = CliRunner()
@@ -24,6 +26,18 @@ def test_cli_help() -> None:
 def test_doctor_handles_missing_dependencies(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr("fanatic_agents.cli.main.shutil.which", lambda _: None)
+    monkeypatch.setattr(
+        "fanatic_agents.cli.main.get_settings",
+        lambda: ApplicationSettings(_env_file=None),
+    )
+
+    def unexpected_configuration(*_args, **_kwargs):
+        raise AssertionError("doctor must not configure OpenAI")
+
+    monkeypatch.setattr(
+        "fanatic_agents.cli.main.configure_openai_sdk",
+        unexpected_configuration,
+    )
 
     result = runner.invoke(app, ["doctor"])
 
@@ -33,6 +47,25 @@ def test_doctor_handles_missing_dependencies(monkeypatch) -> None:
     assert "NOT FOUND" in result.stdout
     assert "NOT CONFIGURED" in result.stdout
     assert "PARTIALLY READY" in result.stdout
+
+
+def test_sandbox_check_does_not_configure_openai(monkeypatch) -> None:
+    def unexpected_configuration(*_args, **_kwargs):
+        raise AssertionError("sandbox commands must not configure OpenAI")
+
+    monkeypatch.setattr(
+        "fanatic_agents.cli.main.configure_openai_sdk",
+        unexpected_configuration,
+    )
+    monkeypatch.setattr(
+        "fanatic_agents.cli.main.check_docker_sandbox",
+        lambda: DockerCheckResult(executable="docker", daemon_available=True),
+    )
+
+    result = runner.invoke(app, ["sandbox", "check"])
+
+    assert result.exit_code == 0
+    assert "Sandbox preflight passed" in result.stdout
 
 
 def test_doctor_never_prints_api_key(monkeypatch) -> None:
@@ -86,6 +119,9 @@ def test_inspect_without_ai_never_calls_agent(
     monkeypatch.setattr(
         "fanatic_agents.cli.main.run_developer_assessment", unexpected_call
     )
+    monkeypatch.setattr(
+        "fanatic_agents.cli.main.configure_openai_sdk", unexpected_call
+    )
 
     result = runner.invoke(app, ["inspect", str(tmp_path)])
 
@@ -119,6 +155,10 @@ def test_inspect_ai_without_api_key_fails_before_agent_call(
 
     monkeypatch.setattr(
         "fanatic_agents.cli.main.run_developer_assessment", unexpected_call
+    )
+    monkeypatch.setattr(
+        "fanatic_agents.cli.main.get_settings",
+        lambda: ApplicationSettings(_env_file=None),
     )
 
     result = runner.invoke(app, ["inspect", str(tmp_path), "--ai"])

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Literal, Protocol
 
 from agents import Agent, Runner
 from pydantic import Field
 
+from fanatic_agents.agents._shared import resolve_model
 from fanatic_agents.core.project import NonEmptyStrictString, StrictModel
 from fanatic_agents.git.inspection import RepositorySnapshot
 
@@ -71,14 +71,11 @@ class DeveloperAgentService:
         runner: SynchronousRunner = Runner,
         model: str | None = None,
     ) -> None:
-        configured_model = model
-        if configured_model is None:
-            configured_model = os.environ.get("FANATIC_AGENTS_MODEL", "").strip() or None
         self._runner = runner
         self._agent: Agent[None] = Agent(
             name="Fanatic Agents Developer",
             instructions=DEVELOPER_AGENT_INSTRUCTIONS,
-            model=configured_model,
+            model=resolve_model(model),
             output_type=DeveloperAssessment,
             tools=[],
         )
