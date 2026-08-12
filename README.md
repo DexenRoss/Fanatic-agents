@@ -142,6 +142,24 @@ Todo el Sprint 3 es read-only:
 
 Un resultado `READY_FOR_IMPLEMENTATION` indica que el plan completó sus gates; no significa que se haya aplicado o ejecutado ningún cambio.
 
+### Controlled Implementation (Sprint 4)
+
+La fase explícita de implementación controlada se ejecuta así:
+
+```bash
+fanatic-agents workflow implement . --image python:3.12-slim --ai
+```
+
+El comando ejecuta Planner, Developer Planning, Reviewer, QA e Implementation solo si cada gate anterior se aprueba, por lo que realiza como máximo cinco llamadas al modelo. Implementation Agent tiene `tools=[]`: no recibe filesystem, shell, Git ni Docker y únicamente produce un `ChangeSet` Pydantic con operaciones `create`, `modify` y `delete` usando contenido completo de archivo.
+
+Antes de cualquier escritura, `ChangePolicy` valida atómicamente paths, alineación con `files_likely_affected`, symlinks, estado previo y límites (10 archivos, 50.000 caracteres por archivo, 150.000 caracteres totales y 2 eliminaciones). Paths inseguros, `.git`, `.env`, credenciales y Docker socket se rechazan; `AGENTS.md`, workflows de CI, deployment, infraestructura, autenticación y migraciones sensibles requieren intervención humana.
+
+Los cambios se aplican con Python, sin `patch`, `git apply`, shell ni scripts generados por el modelo, exclusivamente dentro de una copia temporal filtrada. Los comandos de verificación proceden únicamente del `QAPlan`, se revalidan con `CommandPolicy` y se ejecutan con el Docker Sandbox endurecido sobre ese mismo workspace ya modificado. La imagen debe indicarla el usuario, existir localmente y nunca se descarga automáticamente.
+
+El repositorio original permanece intacto: los cambios temporales no se copian de vuelta, no se crea branch, commit, push ni PR. El workspace se destruye al terminar. Si la verificación falla, el resultado es `VERIFICATION_FAILED` y no existe correction loop, retry autónomo ni una segunda llamada a Implementation Agent.
+
+Sin `--ai`, el comando solo inspecciona localmente e informa `AI implementation: NOT REQUESTED`; no llama agentes ni ejecuta Docker.
+
 ## Configuración
 
 Las configuraciones YAML se validan estrictamente: no se aceptan campos desconocidos, tipos implícitos incorrectos ni límites menores o iguales que cero. Consulta [`projects/example.yaml`](projects/example.yaml) como referencia.
