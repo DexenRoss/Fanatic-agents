@@ -31,6 +31,8 @@ from fanatic_agents.git.inspection import (
     RepositorySnapshot,
 )
 from fanatic_agents.orchestrator.models import WorkflowResult
+from fanatic_agents.implementation.models import ImplementationResult
+from fanatic_agents.implementation.service import run_controlled_implementation
 from fanatic_agents.orchestrator.workflow import run_workflow
 
 from fanatic_agents.sandbox.docker import (
@@ -51,7 +53,7 @@ app.add_typer(config_app, name="config")
 console = Console()
 sandbox_app = typer.Typer(help="Check and run the experimental Docker sandbox.")
 app.add_typer(sandbox_app, name="sandbox")
-workflow_app = typer.Typer(help="Plan read-only multi-agent workflows.")
+workflow_app = typer.Typer(help="Plan workflows and run controlled temporary implementation.")
 app.add_typer(workflow_app, name="workflow")
 
 
@@ -319,6 +321,106 @@ def plan_workflow(
     if result.status == "failed":
         raise typer.Exit(code=1)
 
+
+@workflow_app.command("implement")
+def implement_workflow(
+    repository: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=True,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Repository protected while implementation runs in a temporary copy.",
+    ),
+    image: str = typer.Option(..., "--image", help="Locally available Docker image."),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Run up to five agents and verify temporary changes in Docker.",
+    ),
+) -> None:
+    """Generate and verify changes without modifying the original repository."""
+    console.print("\n[bold cyan]Fanatic Agents Controlled Implementation[/bold cyan]")
+    console.print("\n[bold]Original repository:[/bold] [green]PROTECTED[/green]")
+    console.print("[bold]Implementation workspace:[/bold] [yellow]TEMPORARY[/yellow]")
+    console.print("Changes will NOT be copied back to the repository.")
+    try:
+        snapshot = RepositoryInspector().inspect(repository)
+    except RepositoryInspectionError as exc:
+        console.print("[red]Repository inspection failed:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+
+    console.print("\n[bold]Repository[/bold]")
+    console.print(Text(snapshot.repository_name))
+    if not ai:
+        console.print("\n[bold]AI implementation:[/bold] [yellow]NOT REQUESTED[/yellow]")
+        console.print("No agent was called and Docker was not executed.")
+        return
+
+    settings = get_settings()
+    if not settings.has_openai_api_key:
+        console.print(
+            "\n[red]AI implementation requires OPENAI_API_KEY; "
+            "no agent was called and Docker was not executed.[/red]"
+        )
+        raise typer.Exit(code=1)
+    if not snapshot.has_agent_context():
+        console.print("\n[red]The repository snapshot is empty; no agent was called.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        configure_openai_sdk(settings)
+        workflow = run_workflow(snapshot)
+    except Exception as exc:
+        console.print("\n[red]AI workflow failed safely; implementation did not start.[/red]")
+        raise typer.Exit(code=1) from exc
+
+    console.print("\n[bold]Workflow[/bold]")
+    console.print(workflow.status.upper())
+    if workflow.status != "ready_for_implementation":
+        if workflow.stop_reason:
+            console.print(Text(workflow.stop_reason))
+        console.print("\n[bold]Important:[/bold] No changes were written to the original repository.")
+        raise typer.Exit(code=1)
+
+    result = run_controlled_implementation(repository, snapshot, workflow, image)
+    _render_implementation_result(result)
+    if result.status != "verified":
+        raise typer.Exit(code=1)
+
+
+def _render_implementation_result(result: ImplementationResult) -> None:
+    console.print("\n[bold]Implementation Agent[/bold]")
+    count = len(result.changeset.changes) if result.changeset is not None else 0
+    console.print(f"Generated changes: {count}")
+    if result.changeset is not None:
+        policy_status = (
+            "APPROVED"
+            if result.applied_changes
+            else "HUMAN_REQUIRED"
+            if result.status == "human_required"
+            else "REJECTED"
+            if result.status == "policy_rejected"
+            else "NOT_APPLIED"
+        )
+        console.print(f"\n[bold]Policy[/bold]\n{policy_status}")
+    if result.workspace_summary is not None:
+        console.print("\n[bold]Temporary Workspace[/bold]\nREADY")
+    if result.verification_results:
+        console.print("\n[bold]Verification[/bold]")
+        for verification in result.verification_results:
+            console.print(Text(" ".join(verification.argv)))
+            exit_code = "N/A" if verification.exit_code is None else str(verification.exit_code)
+            console.print(f"Exit code: {exit_code}")
+            console.print("PASS" if verification.exit_code == 0 and not verification.timed_out else "FAIL")
+            _render_sandbox_stream("stdout", verification.stdout, verification.stdout_truncated)
+            _render_sandbox_stream("stderr", verification.stderr, verification.stderr_truncated)
+    console.print("\n[bold]Final Status[/bold]")
+    console.print(result.status.upper())
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+    console.print("\n[bold]Important:[/bold] No changes were written to the original repository.")
 
 def _render_workflow_result(result: WorkflowResult) -> None:
     console.print("\n[bold cyan]Fanatic Agents Workflow[/bold cyan]")
