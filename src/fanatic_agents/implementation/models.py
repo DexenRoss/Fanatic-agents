@@ -1,12 +1,14 @@
 """Strict structured contracts for controlled implementation."""
 
 from __future__ import annotations
+import hashlib
 
 from typing import Literal
 
 from pydantic import Field, model_validator
 
 from fanatic_agents.core.project import NonEmptyStrictString, StrictModel
+from fanatic_agents.git.models import BaseRepositoryState
 from fanatic_agents.sandbox.models import SandboxCommandResult
 
 MAX_CHANGED_FILES = 10
@@ -68,6 +70,12 @@ class ChangeSet(StrictModel):
                 f"ChangeSet exceeds total generated characters ({MAX_TOTAL_CHARACTERS})"
             )
         return self
+def changeset_sha256(changeset: ChangeSet) -> str:
+    """Bind promotion to the exact structured ChangeSet that was verified."""
+    payload = changeset.model_dump_json().encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 
 
 class AppliedChange(StrictModel):
@@ -94,7 +102,9 @@ class ImplementationResult(StrictModel):
     """Terminal result of one non-iterative implementation phase."""
 
     task: NonEmptyStrictString
+    base_repository_state: BaseRepositoryState | None = None
     changeset: ChangeSet | None = None
+    verified_changeset_sha256: str | None = None
     applied_changes: list[AppliedChange] = Field(default_factory=list)
     verification_results: list[SandboxCommandResult] = Field(default_factory=list)
     status: ImplementationStatus
