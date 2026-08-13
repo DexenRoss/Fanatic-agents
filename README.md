@@ -160,6 +160,79 @@ El repositorio original permanece intacto: los cambios temporales no se copian d
 
 Sin `--ai`, el comando solo inspecciona localmente e informa `AI implementation: NOT REQUESTED`; no llama agentes ni ejecuta Docker.
 
+### Verified Change Promotion (Sprint 5)
+
+Un `ChangeSet` que termina en `VERIFIED` puede conservarse solo mediante la
+autorización humana explícita `--promote`:
+
+```text
+VERIFIED
+  -> explicit --promote
+  -> new local fanatic/* branch
+  -> dedicated Git worktree
+  -> exact verified ChangeSet, uncommitted
+```
+
+Ejemplo:
+
+```bash
+fanatic-agents workflow implement PROJECT \
+  --image python:3.12-slim \
+  --ai \
+  --promote \
+  --branch fanatic/task-name
+```
+
+La promoción exige que `PROJECT` sea la raíz de un repositorio Git, que
+`HEAD` no esté detached, que el working tree original esté limpio y que el
+branch y commit sigan siendo exactamente los registrados antes de Controlled
+Implementation. El nombre de rama lo proporciona el usuario, debe ser un ref
+Git válido bajo `fanatic/` y no puede existir previamente. `--promote`
+requiere `--branch`, y `--branch` sin `--promote` se rechaza.
+
+Fanatic Agents crea el worktree fuera del repositorio original, con un layout
+hermano equivalente a:
+
+```text
+<repo-parent>/
+  project/
+  .fanatic-agents-worktrees/
+    project/
+      fanatic-task-name-<branch-hash>/
+```
+
+Antes de crear recursos se vuelve a ejecutar `ChangePolicy`. El worktree nace
+desde el SHA exacto registrado, se aplica el mismo `ChangeSet` ya verificado y
+se comprueban el contenido exacto de cada create/modify/delete y el conjunto
+estricto de paths informado por Git. La promoción no llama nuevamente al
+modelo, no ejecuta tests en el worktree persistente y no relaja
+`PermissionsConfig`.
+
+La rama nueva continúa apuntando al commit base. Los cambios verificados viven
+intencionalmente como cambios **sin commit** en su worktree para revisión
+humana. No se ejecuta `git add`, commit, push, Pull Request, merge ni rebase.
+El repositorio original conserva su branch, `HEAD`, limpieza y archivos.
+
+Revisión manual:
+
+```bash
+cd <promotion-worktree>
+git status
+git diff
+```
+
+Para descartar manualmente una promoción exitosa, desde el repositorio original:
+
+```bash
+git worktree remove --force <promotion-worktree>
+git branch -d fanatic/task-name
+```
+
+Fanatic Agents no elimina automáticamente worktrees exitosos. Si una promoción
+falla después de crear recursos, elimina únicamente ese worktree fallido y la
+rama nueva creada por esa misma operación.
+
+
 ## Configuración
 
 Las configuraciones YAML se validan estrictamente: no se aceptan campos desconocidos, tipos implícitos incorrectos ni límites menores o iguales que cero. Consulta [`projects/example.yaml`](projects/example.yaml) como referencia.

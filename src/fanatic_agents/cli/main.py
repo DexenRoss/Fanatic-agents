@@ -25,10 +25,16 @@ from fanatic_agents.agents._shared import (
 )
 from fanatic_agents.core.config import ConfigLoadError, load_project_config
 from fanatic_agents.core.settings import ApplicationSettings, get_settings
+from fanatic_agents.git.errors import RepositoryStateError
 from fanatic_agents.git.inspection import (
     RepositoryInspectionError,
     RepositoryInspector,
     RepositorySnapshot,
+)
+from fanatic_agents.git.models import BaseRepositoryState, PromotionResult
+from fanatic_agents.git.promotion import (
+    capture_base_repository_state,
+    promote_verified_changes,
 )
 from fanatic_agents.orchestrator.models import WorkflowResult
 from fanatic_agents.implementation.models import ImplementationResult
@@ -339,8 +345,25 @@ def implement_workflow(
         "--ai",
         help="Run up to five agents and verify temporary changes in Docker.",
     ),
+    promote: bool = typer.Option(
+        False,
+        "--promote",
+        help="Explicitly promote VERIFIED changes to a new local worktree.",
+    ),
+    branch: str | None = typer.Option(
+        None,
+        "--branch",
+        help="New local fanatic/* branch required by --promote.",
+    ),
 ) -> None:
-    """Generate and verify changes without modifying the original repository."""
+    """Generate, verify, and optionally promote changes without touching the source tree."""
+    if promote and branch is None:
+        raise typer.BadParameter("--promote requires --branch.")
+    if branch is not None and not promote:
+        raise typer.BadParameter("--branch requires --promote.")
+    if promote and not ai:
+        raise typer.BadParameter("--promote requires --ai.")
+
     console.print("\n[bold cyan]Fanatic Agents Controlled Implementation[/bold cyan]")
     console.print("\n[bold]Original repository:[/bold] [green]PROTECTED[/green]")
     console.print("[bold]Implementation workspace:[/bold] [yellow]TEMPORARY[/yellow]")
@@ -384,9 +407,56 @@ def implement_workflow(
         console.print("\n[bold]Important:[/bold] No changes were written to the original repository.")
         raise typer.Exit(code=1)
 
-    result = run_controlled_implementation(repository, snapshot, workflow, image)
+    base_state: BaseRepositoryState | None = None
+    if promote:
+        try:
+            base_state = capture_base_repository_state(repository)
+        except RepositoryStateError as exc:
+            _render_promotion_result(
+                PromotionResult(
+                    repository=str(Path(repository).expanduser().resolve(strict=False)),
+                    promoted_branch=branch,
+                    status=exc.status,
+                    stop_reason=str(exc),
+                ),
+                implementation_status="NOT STARTED",
+            )
+            raise typer.Exit(code=1) from exc
+        if not base_state.working_tree_clean:
+            _render_promotion_result(
+                PromotionResult(
+                    repository=base_state.repository_path,
+                    base_branch=base_state.branch,
+                    base_commit=base_state.commit_sha,
+                    promoted_branch=branch,
+                    status="repository_dirty",
+                    stop_reason="Promotion requires the original working tree to be clean.",
+                ),
+                implementation_status="NOT STARTED",
+            )
+            raise typer.Exit(code=1)
+
+    if base_state is None:
+        result = run_controlled_implementation(repository, snapshot, workflow, image)
+    else:
+        result = run_controlled_implementation(
+            repository, snapshot, workflow, image, base_state
+        )
     _render_implementation_result(result)
     if result.status != "verified":
+        raise typer.Exit(code=1)
+    if not promote:
+        return
+
+    assert branch is not None and workflow.developer is not None
+    promotion = promote_verified_changes(
+        repository,
+        result,
+        branch,
+        workflow.developer.files_likely_affected,
+    )
+    _render_promotion_result(promotion)
+    if promotion.status != "promoted":
         raise typer.Exit(code=1)
 
 
@@ -421,6 +491,31 @@ def _render_implementation_result(result: ImplementationResult) -> None:
     if result.stop_reason:
         console.print(Text(result.stop_reason))
     console.print("\n[bold]Important:[/bold] No changes were written to the original repository.")
+
+
+def _render_promotion_result(
+    result: PromotionResult, *, implementation_status: str = "VERIFIED"
+) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Verified Change Promotion[/bold cyan]")
+    console.print("\n[bold]Original repository[/bold]")
+    console.print(Text(result.repository))
+    console.print("[green]PROTECTED[/green]")
+    console.print(f"\n[bold]Implementation[/bold]\n{implementation_status}")
+    promotion_status = "APPROVED" if result.status == "promoted" else "REJECTED"
+    console.print(f"\n[bold]Promotion[/bold]\n{promotion_status}")
+    console.print(f"\n[bold]Branch[/bold]\n{result.promoted_branch or 'NOT CREATED'}")
+    console.print(f"\n[bold]Worktree[/bold]\n{result.worktree_path or 'NOT CREATED'}")
+    console.print(f"\n[bold]Changes[/bold]\n{result.changes}")
+    console.print("\n[bold]Commit[/bold]\nNOT CREATED")
+    console.print("\n[bold]Push[/bold]\nNOT PERFORMED")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.status.upper()}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+    console.print("\nThe original working tree was not modified.")
+    if result.status == "promoted":
+        console.print(
+            "Changes are available for human review in the promotion worktree."
+        )
 
 def _render_workflow_result(result: WorkflowResult) -> None:
     console.print("\n[bold cyan]Fanatic Agents Workflow[/bold cyan]")

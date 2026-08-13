@@ -7,12 +7,14 @@ from typing import Protocol
 
 from fanatic_agents.agents.implementation import ImplementationAgentService
 from fanatic_agents.git.inspection import RepositorySnapshot
+from fanatic_agents.git.models import BaseRepositoryState
 from fanatic_agents.implementation.apply import ChangeSetApplier
 from fanatic_agents.implementation.errors import ChangeApplicationError
 from fanatic_agents.implementation.models import (
     AppliedChange,
     ChangeSet,
     ImplementationResult,
+    changeset_sha256,
     ImplementationStatus,
     WorkspaceSummary,
 )
@@ -79,6 +81,7 @@ class ControlledImplementationService:
         snapshot: RepositorySnapshot,
         workflow: WorkflowResult,
         image: str,
+        base_repository_state: BaseRepositoryState | None = None,
     ) -> ImplementationResult:
         """Run one implementation call only after every Sprint 3 gate passed."""
         task = _task_title(workflow)
@@ -93,6 +96,7 @@ class ControlledImplementationService:
                 task,
                 status=status,
                 reason="Implementation requires a workflow with status ready_for_implementation.",
+                base_repository_state=base_repository_state,
             )
         planner_task, developer_plan, reviewer, qa = approved
 
@@ -100,7 +104,10 @@ class ControlledImplementationService:
             validated_image = validate_image_reference(image)
         except SandboxPolicyError as exc:
             return _result_without_workspace(
-                task, status="policy_rejected", reason=str(exc)
+                task,
+                status="policy_rejected",
+                reason=str(exc),
+                base_repository_state=base_repository_state,
             )
 
         try:
@@ -112,6 +119,7 @@ class ControlledImplementationService:
                 task,
                 status="implementation_failed",
                 reason="Implementation Agent failed; no workspace changes were applied.",
+                base_repository_state=base_repository_state,
             )
 
         results: list[SandboxCommandResult] = []
@@ -139,6 +147,7 @@ class ControlledImplementationService:
                             else "policy_rejected"
                         ),
                         reason=reason,
+                        base_repository_state=base_repository_state,
                     )
 
                 applied = self._applier.apply(changeset, prepared.path)
@@ -153,6 +162,7 @@ class ControlledImplementationService:
                             applied=applied,
                             status="policy_rejected",
                             reason=f"QA command was rejected before execution: {exc}",
+                            base_repository_state=base_repository_state,
                         )
                     result = self._sandbox.run_prepared_workspace(
                         prepared, validated_image, command
@@ -185,7 +195,11 @@ class ControlledImplementationService:
             )
         return ImplementationResult(
             task=task,
+            base_repository_state=base_repository_state,
             changeset=changeset,
+            verified_changeset_sha256=(
+                changeset_sha256(changeset) if final_status == "verified" else None
+            ),
             applied_changes=applied,
             verification_results=results,
             status=final_status,
@@ -220,10 +234,15 @@ def _task_title(workflow: WorkflowResult) -> str:
 
 
 def _result_without_workspace(
-    task: str, *, status: ImplementationStatus, reason: str
+    task: str,
+    *,
+    status: ImplementationStatus,
+    reason: str,
+    base_repository_state: BaseRepositoryState | None = None,
 ) -> ImplementationResult:
     return ImplementationResult(
         task=task,
+        base_repository_state=base_repository_state,
         status=status,
         stop_reason=reason,
         tests_passed=False,
@@ -239,10 +258,12 @@ def _workspace_result(
     status: ImplementationStatus,
     reason: str,
     applied: list[AppliedChange] | None = None,
+    base_repository_state: BaseRepositoryState | None = None,
 ) -> ImplementationResult:
     applied_changes = applied or []
     return ImplementationResult(
         task=task,
+        base_repository_state=base_repository_state,
         changeset=changeset,
         applied_changes=applied_changes,
         status=status,
@@ -263,6 +284,7 @@ def run_controlled_implementation(
     snapshot: RepositorySnapshot,
     workflow: WorkflowResult,
     image: str,
+    base_repository_state: BaseRepositoryState | None = None,
 ) -> ImplementationResult:
     """CLI boundary for one default controlled implementation pass."""
     return ControlledImplementationService().run(
@@ -270,4 +292,5 @@ def run_controlled_implementation(
         snapshot=snapshot,
         workflow=workflow,
         image=image,
+        base_repository_state=base_repository_state,
     )
