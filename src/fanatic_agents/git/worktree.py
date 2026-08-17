@@ -10,6 +10,7 @@ from fanatic_agents.git.errors import GitCommandError, RepositoryStateError
 from fanatic_agents.git.models import BaseRepositoryState
 
 GIT_TIMEOUT_SECONDS = 10.0
+MAX_GIT_OUTPUT = 20_000
 
 
 class GitRunner:
@@ -24,7 +25,7 @@ class GitRunner:
         self, repository: Path, *arguments: str
     ) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 ["git", *arguments],
                 cwd=repository,
                 capture_output=True,
@@ -35,6 +36,12 @@ class GitRunner:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             raise GitCommandError("Git command could not complete safely.") from exc
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            result.stdout[:MAX_GIT_OUTPUT],
+            result.stderr[:MAX_GIT_OUTPUT],
+        )
 
 
 class RepositoryStateReader:
