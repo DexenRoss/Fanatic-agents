@@ -1,5 +1,7 @@
 """CLI gates and rendering for verified local promotion."""
 
+
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,8 +16,16 @@ from fanatic_agents.implementation.models import (
     ImplementationResult,
 )
 from test_implementation_flow import workflow
+import re
 
 runner = CliRunner()
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def plain_cli_output(output: str) -> str:
+    without_ansi = ANSI_ESCAPE.sub("", output)
+    return " ".join(without_ansi.split())
 
 
 def project(tmp_path: Path) -> Path:
@@ -81,8 +91,11 @@ def test_promote_requires_branch_and_branch_requires_promote(
             "fanatic/task",
         ],
     )
-    assert missing.exit_code == 2 and "--promote requires --branch" in missing.output
-    assert stray.exit_code == 2 and "--branch requires --promote" in stray.output
+    assert missing.exit_code == 2
+    assert "--promote requires --branch" in plain_cli_output(missing.output)
+
+    assert stray.exit_code == 2
+    assert "--branch requires --promote" in plain_cli_output(stray.output)
 
     no_ai = runner.invoke(
         app,
@@ -97,7 +110,8 @@ def test_promote_requires_branch_and_branch_requires_promote(
             "fanatic/task",
         ],
     )
-    assert no_ai.exit_code == 2 and "--promote requires --ai" in no_ai.output
+    assert no_ai.exit_code == 2
+    assert "--promote requires --ai" in plain_cli_output(no_ai.output)
 
 
 def test_without_promote_preserves_sprint4_and_calls_no_promotion(
