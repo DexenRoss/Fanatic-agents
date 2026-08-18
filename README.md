@@ -8,7 +8,7 @@ Fanatic Agents es una plataforma experimental para orquestar agentes de IA espec
 - Python 3.12 o posterior
 - `pip`
 - Git, Docker y GitHub CLI (`gh`) son recomendables y se comprueban con `doctor`
-- GitHub CLI autenticado es obligatorio únicamente para `workflow deliver`
+- GitHub CLI autenticado es obligatorio para `workflow deliver` y `workflow observe`
 - `OPENAI_API_KEY` solo es necesaria para comandos con `--ai`; delivery no la usa
 
 ## Instalación
@@ -324,6 +324,74 @@ Delivery termina en `DELIVERED_FOR_REVIEW`. No existe force push, merge
 automático, borrado remoto, polling de CI ni deployment. El repositorio
 original no cambia; commit y push ocurren exclusivamente en el promotion
 worktree y el PR queda esperando revisión humana.
+
+
+### Pull Request Observation (Sprint 7)
+
+Sprint 7 añade una fase separada, determinística y de solo lectura después de
+la entrega:
+
+```text
+DELIVERED_FOR_REVIEW
+  -> OBSERVE
+  -> WAITING_FOR_CI
+  -> WAITING_FOR_REVIEW
+  -> READY_FOR_HUMAN_MERGE
+```
+
+El comando obtiene repository, número de PR, ramas y SHA esperado desde el
+`PromotionReceipt` externo creado por Sprint 6; no es necesario volver a
+introducir owner, repository ni número:
+
+```bash
+fanatic-agents workflow observe <promotion-worktree>
+```
+
+La observación comprueba primero la provenance completa: repository y número
+codificados en la URL, branch base, branch `fanatic/*` y el SHA exacto del
+único commit entregado. Un push posterior produce `PR_HEAD_DRIFTED`; Fanatic
+Agents no evalúa ni corrige esos commits nuevos.
+
+`gh pr view --json` aporta estado, draft, mergeability, review decision,
+reviews y `statusCheckRollup`. Se observan todos los proveedores reportados
+por GitHub (Actions, linters, escáneres y checks externos). Failure, timeout,
+action-required o cancelación producen `CI_FAILED`; estados pendientes o
+desconocidos producen `WAITING_FOR_CI`; checks terminados con success, skipped
+o neutral producen `CI_PASSED`; una lista vacía produce `NO_CI_REPORTED` y
+nunca se interpreta como CI aprobado.
+
+Después de CI verde, approvals producen `READY_FOR_HUMAN_MERGE`; review
+pendiente produce `WAITING_FOR_REVIEW`, y `CHANGES_REQUESTED` detiene la
+observación. También son estados explícitos `PR_DRAFT`, `MERGE_CONFLICT`,
+`PR_CLOSED`, `MERGED_EXTERNALLY`, `INVALID_DELIVERY`, `GITHUB_UNAVAILABLE` y
+`OBSERVATION_FAILED`. `MERGED_EXTERNALLY` solo informa que un humano u otra
+herramienta realizó el merge; Fanatic Agents no se atribuye esa acción.
+
+Hay polling local opcional, siempre acotado y sin threads ni scheduler:
+
+```bash
+fanatic-agents workflow observe <promotion-worktree> \
+  --watch \
+  --interval-seconds 30 \
+  --timeout-seconds 600
+```
+
+El intervalo mínimo es 10 segundos y el timeout máximo es 1800 segundos. Al
+vencer, se devuelve el último snapshot sin rerun de CI, retry autónomo,
+comentario ni edición de código. El snapshot normalizado más reciente se
+persiste junto al receipt en `.fanatic-agents-worktrees/.metadata/`; no guarda
+la respuesta completa de GitHub, logs, tokens, variables de entorno ni
+secrets.
+
+Con `--config`, `permissions.observe_pull_request` debe estar habilitado; sin
+configuración, ejecutar manualmente `observe` constituye autorización humana
+explícita de lectura. Esta fase hace **cero llamadas al modelo**, no requiere
+`OPENAI_API_KEY`, no invoca Git y no modifica repository, worktree, index,
+branch, commit, remote ni Pull Request.
+
+**Fanatic Agents todavía NO realiza merge automático.**
+`READY_FOR_HUMAN_MERGE` es exclusivamente información para conservar el gate
+humano.
 
 
 ## Configuración

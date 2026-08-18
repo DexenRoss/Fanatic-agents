@@ -27,6 +27,7 @@ permissions:
   commit: true
   push_branch: true
   create_pull_request: true
+  observe_pull_request: true
   merge: false
   production_deploy: false
   modify_secrets: false
