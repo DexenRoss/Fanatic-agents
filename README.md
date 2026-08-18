@@ -1,6 +1,6 @@
 # Fanatic Agents
 
-Fanatic Agents es una plataforma experimental para orquestar agentes de IA especializados en proyectos de software con permisos explícitos y autonomía limitada. Sprint 1 añade inspección determinística de repositorios y un Developer Agent opcional de solo lectura.
+Fanatic Agents es una plataforma experimental para orquestar agentes de IA especializados con permisos explícitos, autonomía limitada y entrega de cambios para revisión humana.
 
 
 ## Requisitos
@@ -8,7 +8,8 @@ Fanatic Agents es una plataforma experimental para orquestar agentes de IA espec
 - Python 3.12 o posterior
 - `pip`
 - Git, Docker y GitHub CLI (`gh`) son recomendables y se comprueban con `doctor`
-- `OPENAI_API_KEY` solo es necesaria para `inspect --ai` y `workflow plan --ai`
+- GitHub CLI autenticado es obligatorio únicamente para `workflow deliver`
+- `OPENAI_API_KEY` solo es necesaria para comandos con `--ai`; delivery no la usa
 
 ## Instalación
 
@@ -44,7 +45,7 @@ Consulta los comandos disponibles:
 fanatic-agents --help
 ```
 
-Diagnostica el entorno local sin efectuar llamadas de red ni mostrar secretos:
+Diagnostica el entorno en modo read-only y comprueba también la autenticación de `gh`:
 
 ```bash
 fanatic-agents doctor
@@ -231,6 +232,98 @@ git branch -d fanatic/task-name
 Fanatic Agents no elimina automáticamente worktrees exitosos. Si una promoción
 falla después de crear recursos, elimina únicamente ese worktree fallido y la
 rama nueva creada por esa misma operación.
+
+
+### Git Delivery (Sprint 6)
+
+Sprint 6 mantiene un human review gap obligatorio y añade un comando separado:
+
+```text
+VERIFIED
+  -> PROMOTED
+  -> revision humana del worktree
+  -> workflow deliver
+  -> un commit local
+  -> push de la nueva rama fanatic/*
+  -> Pull Request
+  -> revision humana
+```
+
+Antes de entregar, instala GitHub CLI por separado y autentícalo. Fanatic
+Agents no instala `gh`, no solicita PATs y no almacena tokens de GitHub:
+
+```bash
+gh auth login
+fanatic-agents doctor
+```
+
+El remote debe llamarse `origin` y usar una URL GitHub HTTPS o SSH. La rama
+debe ser la misma rama nueva `fanatic/*` creada por promoción. Un check
+read-only está disponible antes de autorizar efectos:
+
+```bash
+fanatic-agents workflow deliver <promotion-worktree> --check
+```
+
+Entrega explícita:
+
+```bash
+fanatic-agents workflow deliver <promotion-worktree>
+```
+
+Se pueden proporcionar `--commit-message` y `--pr-title`. Ambos valores son
+subjects de una sola línea y se pasan como argumentos, nunca al shell. Sin
+overrides, el mensaje y el título se derivan determinísticamente del título de
+la tarea, sin otra llamada al modelo. Delivery no requiere
+`OPENAI_API_KEY` y añade **cero llamadas a OpenAI**.
+
+Al promover, Fanatic Agents crea un `PromotionReceipt` JSON fuera del
+repositorio y del worktree, bajo
+`.fanatic-agents-worktrees/.metadata/`. El recibo enlaza repository, rama
+base, SHA base, rama promovida, worktree, tarea, operaciones, paths, hashes
+SHA-256 y resumen acotado de verificación. No guarda prompts completos,
+variables de entorno, stdout de tests ni secrets.
+
+`workflow deliver` falla cerrado si el recibo falta o está corrupto, si el
+worktree ya no está registrado, si branch/HEAD/repository no coinciden o si
+existe cualquier cambio manual o path adicional. Para
+create/modify compara hashes; para delete exige ausencia; después compara el
+conjunto exacto de `git status --porcelain`. El staging usa exclusivamente:
+
+```text
+git add --all -- <verified-path-1> <verified-path-2> ...
+```
+
+Nunca usa `git add .`. Después verifica
+`git diff --cached --name-status`, crea un solo commit sin `--no-verify` y
+confirma que su parent es el SHA base. Sólo entonces comprueba que la rama
+remota no exista y ejecuta `git push --set-upstream origin <fanatic-branch>`
+sin force. Finalmente usa `gh pr create` con la rama base registrada; nunca
+elige `main` por defecto si la promoción nació de otra rama.
+
+Si ya existe configuración de proyecto, puede exigirse con `--config`:
+
+```bash
+fanatic-agents workflow deliver <promotion-worktree> \
+  --config projects/example.yaml
+```
+
+`permissions.commit`, `permissions.push_branch` y
+`permissions.create_pull_request` deben estar habilitados; sus defaults
+siguen siendo `false`. Ejecutar el comando es la autorización humana
+explícita cuando no se proporciona una configuración.
+
+El receipt registra atómicamente `promoted`, `commit_created`,
+`branch_pushed` y `pr_created`. Un lock local impide dos deliveries
+simultáneos. Si falla push se conserva el commit; si falla el PR se conserva la
+rama remota; una ejecución posterior continúa sólo la etapa pendiente y
+reutiliza un PR existente. No hay retry loops automáticos ni recovery
+destructivo.
+
+Delivery termina en `DELIVERED_FOR_REVIEW`. No existe force push, merge
+automático, borrado remoto, polling de CI ni deployment. El repositorio
+original no cambia; commit y push ocurren exclusivamente en el promotion
+worktree y el PR queda esperando revisión humana.
 
 
 ## Configuración

@@ -23,8 +23,10 @@ from fanatic_agents.agents._shared import (
     OpenAIConfigurationError,
     configure_openai_sdk,
 )
-from fanatic_agents.core.config import ConfigLoadError, load_project_config
+from fanatic_agents.core.config import ConfigLoadError, ProjectConfig, load_project_config
 from fanatic_agents.core.settings import ApplicationSettings, get_settings
+from fanatic_agents.delivery.models import DeliveryResult
+from fanatic_agents.delivery.service import deliver_promotion
 from fanatic_agents.git.errors import RepositoryStateError
 from fanatic_agents.git.inspection import (
     RepositoryInspectionError,
@@ -36,6 +38,7 @@ from fanatic_agents.git.promotion import (
     capture_base_repository_state,
     promote_verified_changes,
 )
+from fanatic_agents.github.client import check_github_cli
 from fanatic_agents.orchestrator.models import WorkflowResult
 from fanatic_agents.implementation.models import ImplementationResult
 from fanatic_agents.implementation.service import run_controlled_implementation
@@ -59,7 +62,7 @@ app.add_typer(config_app, name="config")
 console = Console()
 sandbox_app = typer.Typer(help="Check and run the experimental Docker sandbox.")
 app.add_typer(sandbox_app, name="sandbox")
-workflow_app = typer.Typer(help="Plan workflows and run controlled temporary implementation.")
+workflow_app = typer.Typer(help="Plan, implement, promote, and explicitly deliver workflows.")
 app.add_typer(workflow_app, name="workflow")
 
 
@@ -75,7 +78,7 @@ class EnvironmentCheck:
 def collect_environment_checks(
     settings: ApplicationSettings | None = None,
 ) -> list[EnvironmentCheck]:
-    """Inspect local prerequisites without invoking tools or network services."""
+    """Inspect local prerequisites without modifying local or remote state."""
 
     application_settings = settings or get_settings()
     python_version = ".".join(str(part) for part in sys.version_info[:3])
@@ -93,13 +96,22 @@ def collect_environment_checks(
             "OK" if application_settings.has_openai_api_key else "NOT CONFIGURED",
             application_settings.has_openai_api_key,
         ),
-        _executable_check("GitHub CLI", "gh"),
+        _github_cli_check(),
     ]
 
 
 def _executable_check(name: str, executable: str) -> EnvironmentCheck:
     available = shutil.which(executable) is not None
     return EnvironmentCheck(name, "OK" if available else "NOT FOUND", available)
+
+def _github_cli_check() -> EnvironmentCheck:
+    if shutil.which("gh") is None:
+        return EnvironmentCheck("GitHub CLI", "NOT FOUND", False)
+    status = check_github_cli()
+    if status.status == "ok":
+        return EnvironmentCheck("GitHub CLI", "OK", True)
+    return EnvironmentCheck("GitHub CLI", "FOUND BUT NOT AUTHENTICATED", False)
+
 
 
 @app.command()
@@ -458,6 +470,87 @@ def implement_workflow(
     _render_promotion_result(promotion)
     if promotion.status != "promoted":
         raise typer.Exit(code=1)
+
+
+@workflow_app.command("deliver")
+def deliver_workflow(
+    promotion_worktree: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Dedicated promotion worktree created by Fanatic Agents.",
+    ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="Optional project YAML; its delivery permissions must be enabled.",
+    ),
+    commit_message: str | None = typer.Option(
+        None, "--commit-message", help="Validated one-line commit subject."
+    ),
+    pr_title: str | None = typer.Option(
+        None, "--pr-title", help="Validated one-line pull request title."
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Run delivery preflight without staging or side effects."
+    ),
+) -> None:
+    """Explicitly commit, push, and open a PR for one exact verified promotion."""
+    project_config: ProjectConfig | None = None
+    if config is not None:
+        try:
+            project_config = load_project_config(config)
+        except (ConfigLoadError, ValidationError) as exc:
+            console.print("[red]Delivery configuration is invalid:[/red]", Text(str(exc)))
+            raise typer.Exit(code=1) from exc
+
+    result = deliver_promotion(
+        promotion_worktree,
+        permissions=project_config.permissions if project_config else None,
+        configured_repository=(
+            Path(project_config.repository.path) if project_config else None
+        ),
+        commit_message=commit_message,
+        pr_title=pr_title,
+        check_only=check,
+    )
+    _render_delivery_result(result, check_only=check)
+    if result.status not in {"ready", "delivered"}:
+        raise typer.Exit(code=1)
+
+
+def _render_delivery_result(
+    result: DeliveryResult, *, check_only: bool = False
+) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Git Delivery[/bold cyan]")
+    console.print("\n[bold]Promotion[/bold]\nVERIFIED / PROMOTED")
+    console.print(f"\n[bold]Repository[/bold]\n{Text(result.repository)}")
+    console.print(f"\n[bold]Branch[/bold]\n{result.branch or 'UNAVAILABLE'}")
+    if check_only and result.status == "ready":
+        console.print("\n[bold]Mode[/bold]\nCHECK ONLY - NO SIDE EFFECTS")
+    staging = "APPROVED" if result.commit_sha else "NOT PERFORMED"
+    console.print(f"\n[bold]Staging[/bold]\n{staging}")
+    console.print(f"\n[bold]Commit[/bold]\n{result.commit_sha or 'NOT CREATED'}")
+    push = (
+        f"{result.remote}/{result.remote_branch}"
+        if result.remote and result.remote_branch
+        else "NOT PERFORMED"
+    )
+    console.print(f"\n[bold]Push[/bold]\n{push}")
+    pull_request = (
+        f"#{result.pr_number} {result.pr_url}"
+        if result.pr_number and result.pr_url
+        else "NOT CREATED"
+    )
+    console.print(f"\n[bold]Pull Request[/bold]\n{pull_request}")
+    console.print("\n[bold]Automatic merge[/bold]\nDISABLED")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+    console.print("\nThe original working tree was not modified.")
 
 
 def _render_implementation_result(result: ImplementationResult) -> None:

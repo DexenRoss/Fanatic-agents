@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from fanatic_agents.delivery.models import (
+    ExpectedPromotedChange,
+    PromotionReceipt,
+    VerificationSummary,
+)
+from fanatic_agents.delivery.receipt import (
+    PromotionReceiptStore,
+    ReceiptError,
+    repository_identifier,
+)
 from fanatic_agents.git.errors import GitPromotionError, RepositoryStateError
 from fanatic_agents.git.models import BaseRepositoryState, PromotionResult
 from fanatic_agents.git.worktree import PromotionWorktree, RepositoryStateReader
@@ -72,10 +83,12 @@ class VerifiedChangePromotionService:
         state_reader: RepositoryStateReader | None = None,
         change_policy: ChangePolicy | None = None,
         applier: ChangeSetApplier | None = None,
+        receipt_store: PromotionReceiptStore | None = None,
     ) -> None:
         self._state_reader = state_reader or RepositoryStateReader()
         self._change_policy = change_policy or ChangePolicy()
         self._applier = applier or ChangeSetApplier()
+        self._receipt_store = receipt_store or PromotionReceiptStore()
 
     def promote(
         self,
@@ -222,7 +235,49 @@ class VerifiedChangePromotionService:
                 or final_source.commit_sha != base.commit_sha
             ):
                 raise GitPromotionError("The original repository changed during promotion.")
-        except (ChangeApplicationError, GitPromotionError, OSError, UnicodeError):
+            now = datetime.now(UTC)
+            receipt = PromotionReceipt(
+                repository_id=repository_identifier(Path(current.repository_path)),
+                repository_path=current.repository_path,
+                base_branch=base.branch,
+                base_commit=base.commit_sha,
+                promoted_branch=branch,
+                worktree_path=str(destination),
+                task_title=implementation.changeset.task_title,
+                expected_changes=[
+                    ExpectedPromotedChange(
+                        path=change.path,
+                        operation=change.operation,
+                        content_sha256=(
+                            hashlib.sha256((change.content or "").encode("utf-8")).hexdigest()
+                            if change.operation != "delete"
+                            else None
+                        ),
+                    )
+                    for change in implementation.changeset.changes
+                ],
+                implementation_status="verified",
+                promotion_status="promoted",
+                verification_summary=[
+                    VerificationSummary(
+                        argv=result.argv,
+                        exit_code=result.exit_code,
+                        timed_out=result.timed_out,
+                        passed=result.exit_code == 0 and not result.timed_out,
+                    )
+                    for result in implementation.verification_results
+                ],
+                created_at=now,
+                updated_at=now,
+            )
+            self._receipt_store.save(receipt)
+        except (
+            ChangeApplicationError,
+            GitPromotionError,
+            OSError,
+            ReceiptError,
+            UnicodeError,
+        ):
             rollback_confirmed = True
             if creation_started:
                 try:
