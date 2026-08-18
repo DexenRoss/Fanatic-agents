@@ -37,6 +37,7 @@ class PermissionsConfig(StrictModel):
     commit: bool = False
     push_branch: bool = False
     create_pull_request: bool = False
+    observe_pull_request: bool = False
 
     merge: bool = False
     production_deploy: bool = False

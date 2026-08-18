@@ -29,6 +29,7 @@ def valid_config_data() -> dict[str, object]:
             "commit": True,
             "push_branch": True,
             "create_pull_request": True,
+            "observe_pull_request": True,
             "merge": False,
             "production_deploy": False,
             "modify_secrets": False,

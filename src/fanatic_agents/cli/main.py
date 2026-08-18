@@ -42,6 +42,13 @@ from fanatic_agents.github.client import check_github_cli
 from fanatic_agents.orchestrator.models import WorkflowResult
 from fanatic_agents.implementation.models import ImplementationResult
 from fanatic_agents.implementation.service import run_controlled_implementation
+from fanatic_agents.observation.models import PullRequestObservation
+from fanatic_agents.observation.service import (
+    DEFAULT_WATCH_INTERVAL_SECONDS,
+    DEFAULT_WATCH_TIMEOUT_SECONDS,
+    observe_once,
+    observe_until_terminal,
+)
 from fanatic_agents.orchestrator.workflow import run_workflow
 
 from fanatic_agents.sandbox.docker import (
@@ -62,7 +69,9 @@ app.add_typer(config_app, name="config")
 console = Console()
 sandbox_app = typer.Typer(help="Check and run the experimental Docker sandbox.")
 app.add_typer(sandbox_app, name="sandbox")
-workflow_app = typer.Typer(help="Plan, implement, promote, and explicitly deliver workflows.")
+workflow_app = typer.Typer(
+    help="Plan, implement, deliver, and observe human-gated workflows."
+)
 app.add_typer(workflow_app, name="workflow")
 
 
@@ -551,6 +560,126 @@ def _render_delivery_result(
     if result.stop_reason:
         console.print(Text(result.stop_reason))
     console.print("\nThe original working tree was not modified.")
+
+
+@workflow_app.command("observe")
+def observe_workflow(
+    promotion_worktree: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Promotion worktree whose Sprint 6 delivery receipt identifies the PR.",
+    ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="Optional project YAML; observe_pull_request must be enabled.",
+    ),
+    watch: bool = typer.Option(
+        False, "--watch", help="Poll locally until a terminal state or timeout."
+    ),
+    interval_seconds: float = typer.Option(
+        DEFAULT_WATCH_INTERVAL_SECONDS,
+        "--interval-seconds",
+        min=10.0,
+        help="Polling interval in seconds (minimum 10).",
+    ),
+    timeout_seconds: float = typer.Option(
+        DEFAULT_WATCH_TIMEOUT_SECONDS,
+        "--timeout-seconds",
+        min=1.0,
+        max=1800.0,
+        help="Bounded watch timeout in seconds (maximum 1800).",
+    ),
+) -> None:
+    """Read the current CI and human review state of one delivered PR."""
+    project_config: ProjectConfig | None = None
+    if config is not None:
+        try:
+            project_config = load_project_config(config)
+        except (ConfigLoadError, ValidationError) as exc:
+            console.print("[red]Observation configuration is invalid:[/red]", Text(str(exc)))
+            raise typer.Exit(code=1) from exc
+
+    kwargs = {
+        "permissions": project_config.permissions if project_config else None,
+        "configured_repository": (
+            Path(project_config.repository.path) if project_config else None
+        ),
+    }
+    if watch:
+        result = observe_until_terminal(
+            promotion_worktree,
+            interval_seconds=interval_seconds,
+            timeout_seconds=timeout_seconds,
+            **kwargs,
+        )
+    else:
+        result = observe_once(promotion_worktree, **kwargs)
+    _render_observation(result)
+    if result.status in {
+        "invalid_delivery",
+        "github_unavailable",
+        "observation_failed",
+        "pr_head_drifted",
+    }:
+        raise typer.Exit(code=1)
+
+
+def _render_observation(result: PullRequestObservation) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Pull Request Observation[/bold cyan]")
+    console.print(f"\n[bold]Repository[/bold]\n{Text(result.repository)}")
+    pull_request = (
+        f"#{result.pr_number} {result.pr_url or ''}".rstrip()
+        if result.pr_number
+        else "UNAVAILABLE"
+    )
+    console.print(f"\n[bold]Pull Request[/bold]\n{pull_request}")
+    branch = (
+        f"{result.head_branch} -> {result.base_branch}"
+        if result.head_branch and result.base_branch
+        else "UNAVAILABLE"
+    )
+    console.print(f"\n[bold]Branch[/bold]\n{branch}")
+    integrity = (
+        "VERIFIED"
+        if result.expected_head_sha
+        and result.expected_head_sha == result.observed_head_sha
+        else "DRIFTED"
+        if result.observed_head_sha
+        else "UNAVAILABLE"
+    )
+    console.print(f"\n[bold]Head integrity[/bold]\n{integrity}")
+    console.print(f"\n[bold]CI[/bold]\n{result.ci_state.upper()}")
+    console.print("\n[bold]Checks[/bold]")
+    if not result.checks:
+        console.print("NONE REPORTED")
+    for check in result.checks:
+        marker = (
+            "✓"
+            if check.conclusion in {"success", "skipped", "neutral"}
+            else "✗"
+            if check.conclusion in {
+                "failure", "cancelled", "timed_out", "action_required"
+            }
+            else "…"
+        )
+        label = f"{check.context} / {check.name}" if check.context else check.name
+        console.print(Text(f"{marker} {label}"))
+    review = result.review_state.upper()
+    review += f" (approvals: {result.approvals}, changes requested: {result.changes_requested})"
+    console.print(f"\n[bold]Reviews[/bold]\n{review}")
+    console.print(f"\n[bold]Mergeability[/bold]\n{result.mergeable.upper()}")
+    console.print("\n[bold]Automatic merge[/bold]\nDISABLED")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+    console.print(
+        "\nObservation was read-only; the repository and pull request were not modified."
+    )
 
 
 def _render_implementation_result(result: ImplementationResult) -> None:

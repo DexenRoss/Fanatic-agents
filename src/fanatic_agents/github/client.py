@@ -21,7 +21,15 @@ GITHUB_SSH = re.compile(
     r"(?P<repo>[^/]+?)(?:\.git)?$",
     re.IGNORECASE,
 )
-PR_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/pull/(?P<number>[1-9][0-9]*)/?$")
+PR_URL = re.compile(
+    r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/"
+    r"(?P<number>[1-9][0-9]*)/?$",
+    re.IGNORECASE,
+)
+PR_VIEW_FIELDS = (
+    "number,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,"
+    "reviewDecision,statusCheckRollup,reviews,mergedAt,closedAt"
+)
 
 
 class GitHubCommandError(RuntimeError):
@@ -86,6 +94,27 @@ class GitHubCli:
             raise GitHubCommandError("GitHub CLI returned an unexpected pull request.")
         return _parse_reference(item.get("url"), item.get("number"))
 
+    def view_pull_request(self, repository: str, number: int) -> dict[str, object]:
+        """Return one structured PR response using a read-only GitHub CLI query."""
+        if number <= 0:
+            raise ValueError("pull request number must be greater than zero")
+        result = self._run(
+            "pr", "view", str(number), "--repo", repository, "--json", PR_VIEW_FIELDS
+        )
+        if result.returncode != 0:
+            raise GitHubCommandError("The pull request could not be observed safely.")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise GitHubCommandError(
+                "GitHub CLI returned an invalid pull request observation."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise GitHubCommandError(
+                "GitHub CLI returned an unexpected pull request observation."
+            )
+        return payload
+
     def create_pull_request(
         self,
         repository: str,
@@ -132,6 +161,15 @@ def parse_github_repository(remote_url: str) -> str | None:
     if match is None:
         return None
     return f"{match.group('owner')}/{match.group('repo')}"
+
+
+def parse_pull_request_url(url: str) -> tuple[str, int] | None:
+    """Return the repository and number encoded by a canonical GitHub PR URL."""
+    match = PR_URL.fullmatch(url.strip())
+    if match is None:
+        return None
+    repository = f"{match.group('owner')}/{match.group('repo')}"
+    return repository, int(match.group("number"))
 
 
 def check_github_cli() -> GitHubPreflight:
