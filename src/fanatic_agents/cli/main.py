@@ -42,6 +42,11 @@ from fanatic_agents.github.client import check_github_cli
 from fanatic_agents.orchestrator.models import WorkflowResult
 from fanatic_agents.implementation.models import ImplementationResult
 from fanatic_agents.implementation.service import run_controlled_implementation
+from fanatic_agents.intake.models import TaskDiscoveryResult, TaskIntakeResult
+from fanatic_agents.intake.service import (
+    discover_tasks,
+    select_task,
+)
 from fanatic_agents.observation.models import PullRequestObservation
 from fanatic_agents.observation.service import (
     DEFAULT_WATCH_INTERVAL_SECONDS,
@@ -73,6 +78,8 @@ workflow_app = typer.Typer(
     help="Plan, implement, deliver, and observe human-gated workflows."
 )
 app.add_typer(workflow_app, name="workflow")
+task_app = typer.Typer(help="Discover and locally reserve authorized tasks.")
+app.add_typer(task_app, name="task")
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,6 +829,141 @@ def _render_list(title: str, items: list[str]) -> None:
         return
     for item in items:
         console.print(Text(f"- {item}"))
+
+
+@task_app.command("discover")
+def discover_task_command(
+    project: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Local project repository whose open GitHub Issues should be inspected.",
+    ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="Optional project YAML; intake and read_issues must be enabled.",
+    ),
+) -> None:
+    """List eligible opt-in GitHub Issues without selecting any task."""
+
+    project_config = _load_task_config(config)
+    result = discover_tasks(
+        project,
+        intake_config=project_config.intake if project_config else None,
+        permissions=project_config.permissions if project_config else None,
+        configured_repository=(
+            Path(project_config.repository.path) if project_config else None
+        ),
+    )
+    _render_task_discovery(result)
+    if result.status not in {"tasks_discovered", "no_eligible_tasks"}:
+        raise typer.Exit(code=1)
+
+
+@task_app.command("select")
+def select_task_command(
+    project: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Local project repository from which exactly one task may be reserved.",
+    ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="Optional project YAML; intake and read_issues must be enabled.",
+    ),
+) -> None:
+    """Select one deterministic task, persist a local receipt, and stop."""
+
+    project_config = _load_task_config(config)
+    result = select_task(
+        project,
+        intake_config=project_config.intake if project_config else None,
+        permissions=project_config.permissions if project_config else None,
+        configured_repository=(
+            Path(project_config.repository.path) if project_config else None
+        ),
+    )
+    _render_task_intake(result)
+    if result.status not in {"task_selected", "no_eligible_tasks"}:
+        raise typer.Exit(code=1)
+
+
+def _load_task_config(config: Path | None) -> ProjectConfig | None:
+    if config is None:
+        return None
+    try:
+        return load_project_config(config)
+    except (ConfigLoadError, ValidationError) as exc:
+        console.print("[red]Task intake configuration is invalid:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+
+
+def _render_task_discovery(result: TaskDiscoveryResult) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Task Discovery[/bold cyan]")
+    repository = result.github_repository or result.repository
+    console.print(f"\n[bold]Repository[/bold]\n{Text(repository)}")
+    console.print(
+        f"\n[bold]Open issues fetched[/bold]\n{result.candidates_fetched}"
+    )
+    console.print(f"\n[bold]Eligible[/bold]\n{result.candidates_eligible}")
+    for issue in result.eligible_candidates:
+        console.print(Text(f"\n#{issue.number}  {issue.title}"))
+        labels = ", ".join(issue.labels) if issue.labels else "none"
+        console.print(Text(f"      labels: {labels}"))
+        if issue.body_truncated:
+            console.print("      body: TRUNCATED")
+    console.print(
+        f"\n[bold]Blocked / ignored[/bold]\n"
+        f"{result.candidates_fetched - result.candidates_eligible}"
+    )
+    console.print("\nNo task was selected.")
+    console.print("GitHub was not modified.")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+
+
+def _render_task_intake(result: TaskIntakeResult) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Task Intake[/bold cyan]")
+    repository = result.github_repository or result.repository
+    console.print(f"\n[bold]Repository[/bold]\n{Text(repository)}")
+    console.print(f"\n[bold]Eligible tasks[/bold]\n{result.candidates_eligible}")
+    task = result.selected_task
+    if task is not None:
+        console.print(f"\n[bold]Selected[/bold]\n", end="")
+        console.print(Text(f"#{task.issue_number} {task.title}"))
+        console.print(f"\n[bold]Priority[/bold]\n{task.priority.upper()}")
+        labels = ", ".join(task.labels) if task.labels else "none"
+        console.print(f"\n[bold]Labels[/bold]\n{Text(labels)}")
+        console.print("\n[bold]Source[/bold]\nGitHub Issue")
+        console.print("\n[bold]Source trust[/bold]\nUNTRUSTED")
+        console.print(
+            f"\n[bold]Base[/bold]\n{Text(task.base_branch)} @ "
+            f"{task.base_commit_sha[:7]}"
+        )
+        console.print(f"\n[bold]Receipt[/bold]\n{Text(result.receipt_path or '')}")
+    else:
+        console.print("\n[bold]Selected[/bold]\nNONE")
+    console.print("\n[bold]GitHub mutation[/bold]\nNONE")
+    console.print("\n[bold]Git mutation[/bold]\nNONE")
+    console.print("\n[bold]Agents called[/bold]\n0")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+    if task is not None:
+        console.print(
+            "\nFanatic Agents has selected work but has NOT started implementation."
+        )
+
 
 if __name__ == "__main__":
     app()
