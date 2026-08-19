@@ -30,6 +30,10 @@ PR_VIEW_FIELDS = (
     "number,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,"
     "reviewDecision,statusCheckRollup,reviews,mergedAt,closedAt"
 )
+ISSUE_LIST_FIELDS = (
+    "number,title,body,url,state,labels,assignees,author,createdAt,updatedAt,milestone"
+)
+MAX_ISSUE_COMMAND_OUTPUT = 3_000_000
 
 
 class GitHubCommandError(RuntimeError):
@@ -114,6 +118,40 @@ class GitHubCli:
                 "GitHub CLI returned an unexpected pull request observation."
             )
         return payload
+    def list_open_issues(
+        self, repository: str, *, limit: int
+    ) -> list[dict[str, object]]:
+        """Return a bounded structured open-Issue window without mutating GitHub."""
+        if not 1 <= limit <= 100:
+            raise ValueError("issue limit must be between 1 and 100")
+        result = self._run(
+            "issue",
+            "list",
+            "--repo",
+            repository,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            ISSUE_LIST_FIELDS,
+            output_limit=MAX_ISSUE_COMMAND_OUTPUT,
+        )
+        if result.returncode != 0:
+            raise GitHubCommandError("GitHub Issues could not be read safely.")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise GitHubCommandError(
+                "GitHub CLI returned an invalid Issue result."
+            ) from exc
+        if not isinstance(payload, list) or any(
+            not isinstance(item, dict) for item in payload
+        ):
+            raise GitHubCommandError("GitHub CLI returned an unexpected Issue result.")
+        return payload
+
+
 
     def create_pull_request(
         self,
@@ -137,7 +175,9 @@ class GitHubCli:
                 return PullRequestReference(int(match.group("number")), line.rstrip("/"))
         raise GitHubCommandError("GitHub CLI did not return a valid pull request URL.")
 
-    def _run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, *arguments: str, output_limit: int = MAX_COMMAND_OUTPUT
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.pop("OPENAI_API_KEY", None)
         try:
@@ -148,8 +188,8 @@ class GitHubCli:
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             raise GitHubCommandError("GitHub CLI could not complete safely.") from exc
         return subprocess.CompletedProcess(
-            result.args, result.returncode, result.stdout[:MAX_COMMAND_OUTPUT],
-            result.stderr[:MAX_COMMAND_OUTPUT],
+            result.args, result.returncode, result.stdout[:output_limit],
+            result.stderr[:output_limit],
         )
 
 

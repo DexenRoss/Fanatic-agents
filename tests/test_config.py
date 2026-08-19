@@ -15,6 +15,8 @@ def test_valid_project_config(valid_config_data: dict[str, object]) -> None:
     assert config.project.name == "example-project"
     assert config.repository.main_branch == "main"
     assert config.limits.max_daily_cost_usd == 5.0
+    assert config.intake.enabled is False
+    assert config.intake.required_labels == ["fanatic:ready"]
 
 
 @pytest.mark.parametrize(
@@ -45,6 +47,7 @@ def test_permission_defaults_are_safe() -> None:
     assert permissions.production_deploy is False
     assert permissions.modify_secrets is False
     assert permissions.destructive_database_changes is False
+    assert permissions.read_issues is False
     assert not any(permissions.model_dump().values())
 
 

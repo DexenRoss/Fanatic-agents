@@ -28,8 +28,20 @@ permissions:
   push_branch: true
   create_pull_request: true
   observe_pull_request: true
+  read_issues: true
   merge: false
   production_deploy: false
   modify_secrets: false
   destructive_database_changes: false
 
+
+intake:
+  enabled: false
+  source: github_issues
+  required_labels:
+    - fanatic:ready
+  blocked_labels:
+    - fanatic:blocked
+    - fanatic:manual
+  max_candidates: 50
+  ordering: priority_then_oldest

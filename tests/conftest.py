@@ -30,10 +30,19 @@ def valid_config_data() -> dict[str, object]:
             "push_branch": True,
             "create_pull_request": True,
             "observe_pull_request": True,
+            "read_issues": True,
             "merge": False,
             "production_deploy": False,
             "modify_secrets": False,
             "destructive_database_changes": False,
+        },
+        "intake": {
+            "enabled": False,
+            "source": "github_issues",
+            "required_labels": ["fanatic:ready"],
+            "blocked_labels": ["fanatic:blocked", "fanatic:manual"],
+            "max_candidates": 50,
+            "ordering": "priority_then_oldest",
         },
     }
 

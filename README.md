@@ -394,6 +394,69 @@ branch, commit, remote ni Pull Request.
 humano.
 
 
+### GitHub Issue Task Intake (Sprint 8)
+
+Sprint 8 añade descubrimiento y selección local de trabajo autorizado, sin
+conectarlo todavía al workflow de implementación:
+
+```text
+GitHub Issue
+  -> label fanatic:ready
+  -> TaskIntakePolicy
+  -> deterministic selection
+  -> local TaskIntakeReceipt
+  -> TASK_SELECTED
+  -> STOP
+```
+
+Los comandos son independientes de `workflow implement`:
+
+```bash
+fanatic-agents task discover /ruta/al/repositorio
+fanatic-agents task select /ruta/al/repositorio
+```
+
+El path debe pertenecer a un repositorio Git con `origin` GitHub HTTPS o SSH.
+Fanatic Agents deriva `OWNER/REPO` del remote y usa únicamente
+`gh issue list --state open --limit ... --json ...`. No solicita ni persiste
+un PAT. El backlog está acotado a 50 Issues por defecto y a un máximo
+configurable de 100.
+
+La autorización es opt-in y fail-closed. Por defecto una Issue necesita
+`fanatic:ready`; `fanatic:blocked` o `fanatic:manual` impiden su selección.
+Los labels requeridos y bloqueados son configurables por proyecto. Con
+`--config`, tanto `intake.enabled` como `permissions.read_issues` deben
+estar habilitados. Sin config, la ejecución manual autoriza solo esa operación
+de lectura.
+
+La selección no usa un LLM. Ordena localmente y sin depender del orden de
+GitHub: `priority:p0`, `p1`, `p2`, `p3`, sin prioridad; después la
+Issue más antigua y finalmente el número menor. Una Issue con varios labels
+de prioridad es inválida y no se selecciona. `select` siempre hace un fetch
+nuevo, por lo que respeta cierres o cambios de labels ocurridos después de
+`discover`.
+
+Título y body son contenido **no confiable**. Nunca se interpretan como
+comandos, configuración, permisos, paths ni instrucciones para agentes. El body
+se trunca explícitamente a 20.000 caracteres y el modelo conserva
+`source_content_trusted=false`. Sprint 8 realiza cero llamadas a OpenAI,
+Docker, Planner, Developer, Reviewer o QA.
+
+`select` captura branch y HEAD actuales sin hacer checkout, pull ni exigir un
+working tree limpio. Persiste una reserva local `TaskIntakeReceipt` fuera del
+repositorio, bajo `.fanatic-agents-worktrees/.metadata/intake/`. El receipt no
+contiene el body, payload raw, prompts, environment, tokens ni secrets. Un
+receipt activo evita seleccionar dos veces la misma Issue; metadata corrupta
+falla cerrada y nunca se elimina silenciosamente.
+
+Task intake no ejecuta `git add`, commit, push, merge, checkout ni switch. No
+edita, comenta, cierra, asigna o etiqueta Issues; tampoco crea branches, PRs o
+merges. `TASK_SELECTED` significa exclusivamente que el trabajo quedó
+reservado localmente. No existe scheduler, cron, daemon ni inicio automático
+de implementación. Una fase futura podrá consumir el `TaskSpec` después de
+volver a validar repository, branch, SHA, autorización y estado de la Issue.
+
+
 ## Configuración
 
 Las configuraciones YAML se validan estrictamente: no se aceptan campos desconocidos, tipos implícitos incorrectos ni límites menores o iguales que cero. Consulta [`projects/example.yaml`](projects/example.yaml) como referencia.
