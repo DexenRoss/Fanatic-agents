@@ -152,6 +152,34 @@ class GitHubCli:
         return payload
 
 
+    def view_issue(
+        self, repository: str, number: int
+    ) -> dict[str, object]:
+        """Fetch one fresh Issue snapshot without mutating GitHub."""
+        if number <= 0:
+            raise ValueError("issue number must be greater than zero")
+        result = self._run(
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            repository,
+            "--json",
+            ISSUE_LIST_FIELDS,
+            output_limit=MAX_ISSUE_COMMAND_OUTPUT,
+        )
+        if result.returncode != 0:
+            raise GitHubCommandError("The selected GitHub Issue could not be read safely.")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise GitHubCommandError(
+                "GitHub CLI returned an invalid Issue result."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise GitHubCommandError("GitHub CLI returned an unexpected Issue result.")
+        return payload
+
 
     def create_pull_request(
         self,

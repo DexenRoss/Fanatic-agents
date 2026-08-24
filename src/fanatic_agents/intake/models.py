@@ -135,9 +135,13 @@ class TaskSpec(StrictModel):
 TaskStatus = Literal[
     "selected",
     "running",
+    "verified",
     "promoted",
     "delivered",
+    "waiting_for_ci",
     "waiting_for_review",
+    "ready_for_human_merge",
+    "merged_externally",
     "completed",
     "cancelled",
     "failed",

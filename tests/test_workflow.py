@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from fanatic_agents.git.inspection import (
     SnapshotFile,
     SnapshotTruncation,
 )
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import (
     DeveloperPlan,
     PlannerOutput,
@@ -65,11 +67,30 @@ def _task(**changes: Any) -> PlannerTask:
     return PlannerTask(**data)
 
 
-def _planner(task: PlannerTask | None = None) -> PlannerOutput:
+def _planner(
+    task: PlannerTask | None = None, *, source_task_id: str | None = None
+) -> PlannerOutput:
     return PlannerOutput(
         repository_summary="A bounded Python project.",
         status="task_selected",
+        source_task_id=source_task_id,
         selected_task=task or _task(),
+    )
+
+
+def _task_spec() -> TaskSpec:
+    return TaskSpec(
+        task_id="github:owner/repo#8",
+        repository="/repo",
+        issue_number=8,
+        issue_url="https://github.com/owner/repo/issues/8",
+        title="Original Issue title",
+        description="Implement the bounded Issue.",
+        labels=["fanatic:ready"],
+        priority="none",
+        base_branch="main",
+        base_commit_sha="a" * 40,
+        selected_at=datetime(2026, 8, 24, tzinfo=UTC),
     )
 
 
@@ -112,7 +133,9 @@ class FakePlanner:
         self.output = output
         self.calls = calls
 
-    def plan(self, _snapshot: RepositorySnapshot) -> PlannerOutput:
+    def plan(
+        self, _snapshot: RepositorySnapshot, _task_spec: TaskSpec | None = None
+    ) -> PlannerOutput:
         self.calls.append("planner")
         return self.output
 
@@ -122,7 +145,12 @@ class FakeDeveloper:
         self.output = output
         self.calls = calls
 
-    def plan(self, _snapshot: RepositorySnapshot, _task: PlannerTask) -> DeveloperPlan:
+    def plan(
+        self,
+        _snapshot: RepositorySnapshot,
+        _task: PlannerTask,
+        _task_spec: TaskSpec | None = None,
+    ) -> DeveloperPlan:
         self.calls.append("developer")
         return self.output
 
@@ -133,7 +161,11 @@ class FakeReviewer:
         self.calls = calls
 
     def review(
-        self, _snapshot: RepositorySnapshot, _task: PlannerTask, _plan: DeveloperPlan
+        self,
+        _snapshot: RepositorySnapshot,
+        _task: PlannerTask,
+        _plan: DeveloperPlan,
+        _task_spec: TaskSpec | None = None,
     ) -> ReviewerDecision:
         self.calls.append("reviewer")
         return self.output
@@ -150,6 +182,7 @@ class FakeQA:
         _task: PlannerTask,
         _developer: DeveloperPlan,
         _reviewer: ReviewerDecision,
+        _task_spec: TaskSpec | None = None,
     ) -> QAPlan:
         self.calls.append("qa")
         return self.output
@@ -174,7 +207,7 @@ def _orchestrator(
     )
 
 
-def test_complete_workflow_runs_in_order_with_at_most_four_calls() -> None:
+def test_manual_planner_workflow_remains_backward_compatible() -> None:
     orchestrator, calls = _orchestrator()
 
     result = orchestrator.run(_snapshot())
@@ -182,8 +215,49 @@ def test_complete_workflow_runs_in_order_with_at_most_four_calls() -> None:
     assert calls == ["planner", "developer", "reviewer", "qa"]
     assert len(calls) == 4
     assert result.status == "ready_for_implementation"
+    assert result.model_calls == 4
     assert result.developer_command_validations[0].valid is True
     assert result.qa_command_validations[0].valid is True
+
+
+def test_task_aware_workflow_accepts_same_id_with_rephrased_title() -> None:
+    task_spec = _task_spec()
+    orchestrator, calls = _orchestrator(
+        planner=_planner(
+            _task(title="A safe rephrasing of the selected Issue"),
+            source_task_id=task_spec.task_id,
+        )
+    )
+
+    result = orchestrator.run(_snapshot(), task_spec)
+
+    assert calls == ["planner", "developer", "reviewer", "qa"]
+    assert result.status == "ready_for_implementation"
+    assert result.model_calls == 4
+
+
+def test_task_aware_workflow_rejects_different_source_task_id() -> None:
+    task_spec = _task_spec()
+    orchestrator, calls = _orchestrator(
+        planner=_planner(source_task_id="github:owner/repo#9")
+    )
+
+    result = orchestrator.run(_snapshot(), task_spec)
+
+    assert calls == ["planner"]
+    assert result.status == "failed"
+    assert result.model_calls == 1
+
+
+def test_task_aware_workflow_rejects_missing_source_task_id() -> None:
+    task_spec = _task_spec()
+    orchestrator, calls = _orchestrator(planner=_planner())
+
+    result = orchestrator.run(_snapshot(), task_spec)
+
+    assert calls == ["planner"]
+    assert result.status == "failed"
+    assert result.model_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -200,6 +274,7 @@ def test_planner_human_gates_stop_developer(task: PlannerTask) -> None:
 
     assert calls == ["planner"]
     assert result.status == "human_required"
+    assert result.model_calls == 1
 
 
 def test_developer_human_gate_stops_reviewer() -> None:
@@ -211,6 +286,7 @@ def test_developer_human_gate_stops_reviewer() -> None:
 
     assert calls == ["planner", "developer"]
     assert result.status == "human_required"
+    assert result.model_calls == 2
 
 
 @pytest.mark.parametrize(
@@ -231,6 +307,7 @@ def test_invalid_developer_command_stops_reviewer(command: SandboxCommand) -> No
 
     assert calls == ["planner", "developer"]
     assert result.status == "changes_requested"
+    assert result.model_calls == 2
     assert result.developer_command_validations[0].valid is False
     assert "no command was executed" in (result.stop_reason or "")
 
@@ -246,6 +323,7 @@ def test_reviewer_gate_stops_qa(decision: str, status: str) -> None:
 
     assert calls == ["planner", "developer", "reviewer"]
     assert result.status == status
+    assert result.model_calls == 3
 
 
 def test_qa_human_required_sets_final_human_status() -> None:
@@ -276,6 +354,7 @@ def test_empty_snapshot_stops_without_agent_calls() -> None:
 
     assert calls == []
     assert result.status == "insufficient_context"
+    assert result.model_calls == 0
 
 
 def test_agent_exception_is_sanitized_and_stops_workflow() -> None:
@@ -290,7 +369,26 @@ def test_agent_exception_is_sanitized_and_stops_workflow() -> None:
 
     assert calls == []
     assert result.status == "failed"
+    assert result.model_calls == 1
     assert "sk-secret" not in (result.stop_reason or "")
+
+
+def test_planner_none_still_fails_closed_after_one_attempt() -> None:
+    class NonePlanner:
+        def plan(
+            self, _snapshot: RepositorySnapshot, _task_spec: TaskSpec | None = None
+        ) -> None:
+            return None
+
+    orchestrator, calls = _orchestrator()
+    orchestrator._planner = NonePlanner()  # type: ignore[attr-defined]
+
+    result = orchestrator.run(_snapshot())
+
+    assert calls == []
+    assert result.status == "failed"
+    assert result.model_calls == 1
+    assert "returned no output" in (result.stop_reason or "")
 
 
 def test_workflow_never_runs_docker_or_modifies_repository(

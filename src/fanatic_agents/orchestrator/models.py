@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from fanatic_agents.core.project import NonEmptyStrictString, StrictModel
 from fanatic_agents.git.inspection import RepositorySnapshot
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.sandbox.models import SandboxCommand
 
 RiskLevel = Literal["low", "medium", "high"]
@@ -40,6 +41,7 @@ class PlannerOutput(StrictModel):
 
     repository_summary: NonEmptyStrictString
     status: PlannerStatus
+    source_task_id: str | None = None
     selected_task: PlannerTask | None = None
     planning_notes: list[NonEmptyStrictString] = Field(default_factory=list)
 
@@ -130,11 +132,13 @@ class WorkflowResult(StrictModel):
     """All available outputs and the terminal state of one workflow pass."""
 
     repository: RepositorySnapshotMetadata
+    task_spec: TaskSpec | None = None
     planner: PlannerOutput | None = None
     developer: DeveloperPlan | None = None
     developer_command_validations: list[CommandValidation] = Field(default_factory=list)
     reviewer: ReviewerDecision | None = None
     qa: QAPlan | None = None
     qa_command_validations: list[CommandValidation] = Field(default_factory=list)
+    model_calls: int = Field(default=0, strict=True, ge=0, le=4)
     status: WorkflowStatus
     stop_reason: str | None = None

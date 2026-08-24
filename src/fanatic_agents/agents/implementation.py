@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from agents import Agent, Runner
 
-from fanatic_agents.agents._shared import SynchronousRunner, resolve_model, run_structured_agent
+from fanatic_agents.agents._shared import (
+    SynchronousRunner,
+    resolve_model,
+    run_structured_agent,
+    untrusted_task_context,
+)
 from fanatic_agents.git.inspection import RepositorySnapshot
 from fanatic_agents.implementation.models import ChangeSet
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import DeveloperPlan, PlannerTask, QAPlan, ReviewerDecision
 
 IMPLEMENTATION_INSTRUCTIONS = """
@@ -46,6 +52,7 @@ class ImplementationAgentService:
         developer_plan: DeveloperPlan,
         reviewer: ReviewerDecision,
         qa: QAPlan,
+        task_spec: TaskSpec | None = None,
     ) -> ChangeSet:
         context = {
             "repository_snapshot": snapshot.model_dump(mode="json"),
@@ -56,8 +63,10 @@ class ImplementationAgentService:
         }
         import json
 
-        prompt = "Produce one ChangeSet from this approved bounded context.\n\n" + json.dumps(
-            context, indent=2
+        prompt = (
+            "Produce one ChangeSet from this approved bounded context.\n\n"
+            + json.dumps(context, indent=2)
+            + untrusted_task_context(task_spec)
         )
         return run_structured_agent(
             runner=self._runner,

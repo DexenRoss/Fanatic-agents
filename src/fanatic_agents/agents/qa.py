@@ -8,8 +8,10 @@ from fanatic_agents.agents._shared import (
     SynchronousRunner,
     resolve_model,
     run_structured_agent,
+    untrusted_task_context,
 )
 from fanatic_agents.git.inspection import RepositorySnapshot
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import (
     DeveloperPlan,
     PlannerTask,
@@ -51,6 +53,7 @@ class QAAgentService:
         task: PlannerTask,
         developer_plan: DeveloperPlan,
         reviewer: ReviewerDecision,
+        task_spec: TaskSpec | None = None,
     ) -> QAPlan:
         prompt = (
             "Create a read-only verification plan from this approved context.\n\n"
@@ -62,6 +65,7 @@ class QAAgentService:
             + developer_plan.model_dump_json(indent=2)
             + "\n\nReviewer decision:\n"
             + reviewer.model_dump_json(indent=2)
+            + untrusted_task_context(task_spec)
         )
         return run_structured_agent(
             runner=self._runner,

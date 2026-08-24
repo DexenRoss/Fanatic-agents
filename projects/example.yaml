@@ -20,15 +20,16 @@ limits:
   max_iterations_per_task: 6
 
 permissions:
-  read_repository: true
-  create_branch: true
-  modify_files: true
-  run_commands: true
-  commit: true
-  push_branch: true
-  create_pull_request: true
-  observe_pull_request: true
-  read_issues: true
+  read_repository: false
+  create_branch: false
+  modify_files: false
+  run_commands: false
+  commit: false
+  push_branch: false
+  create_pull_request: false
+  observe_pull_request: false
+  read_issues: false
+  autonomous_execution: false
   merge: false
   production_deploy: false
   modify_secrets: false
@@ -45,3 +46,10 @@ intake:
     - fanatic:manual
   max_candidates: 50
   ordering: priority_then_oldest
+
+autonomy:
+  enabled: false
+  max_tasks_per_run: 1
+  auto_promote: false
+  auto_deliver: false
+  observe_after_delivery: true

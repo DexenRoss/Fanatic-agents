@@ -83,6 +83,7 @@ class DeliveryService:
         commit_message: str | None = None,
         pr_title: str | None = None,
         check_only: bool = False,
+        pr_body: str | None = None,
     ) -> DeliveryResult:
         requested = Path(worktree).expanduser().resolve(strict=False)
         fallback = DeliveryResult(
@@ -93,6 +94,7 @@ class DeliveryService:
         try:
             validated_message = _validate_subject(commit_message, "commit message")
             validated_title = _validate_subject(pr_title, "pull request title")
+            validated_body = _validate_body(pr_body)
         except ValueError as exc:
             return fallback.model_copy(
                 update={"status": "delivery_failed", "stop_reason": str(exc)}
@@ -106,6 +108,7 @@ class DeliveryService:
                     commit_message=validated_message,
                     pr_title=validated_title,
                     check_only=check_only,
+                    pr_body=validated_body,
                 )
         except DeliveryLockedError as exc:
             return fallback.model_copy(
@@ -123,6 +126,7 @@ class DeliveryService:
         commit_message: str | None,
         pr_title: str | None,
         check_only: bool,
+        pr_body: str | None,
     ) -> DeliveryResult:
         try:
             receipt = self._receipts.load(worktree)
@@ -248,7 +252,7 @@ class DeliveryService:
                 )
 
         if receipt.delivery_stage == "branch_pushed":
-            body = _pull_request_body(receipt)
+            body = pr_body or _pull_request_body(receipt)
             try:
                 pull_request = self._github.find_pull_request(
                     github_repository,
@@ -540,6 +544,7 @@ def deliver_promotion(
     configured_repository: Path | None = None,
     commit_message: str | None = None,
     pr_title: str | None = None,
+    pr_body: str | None = None,
     check_only: bool = False,
 ) -> DeliveryResult:
     """CLI boundary for deterministic GitHub delivery with zero model calls."""
@@ -549,6 +554,7 @@ def deliver_promotion(
         configured_repository=configured_repository,
         commit_message=commit_message,
         pr_title=pr_title,
+        pr_body=pr_body,
         check_only=check_only,
     )
 
@@ -685,6 +691,18 @@ def _validate_subject(value: str | None, label: str) -> str | None:
     if CONTROL_CHARACTERS.search(normalized):
         raise ValueError(f"The {label} must be one line without control characters.")
     return normalized
+
+def _validate_body(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("The pull request body cannot be empty.")
+    if len(normalized) > 10_000:
+        raise ValueError("The pull request body cannot exceed 10000 characters.")
+    if "\x00" in normalized:
+        raise ValueError("The pull request body contains an invalid control character.")
+    return _redact(normalized)
 
 
 def _default_subject(task_title: str) -> str:

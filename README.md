@@ -472,3 +472,58 @@ Fanatic Agents nunca debe realizar automáticamente las siguientes acciones sin 
 
 Sus permisos tienen defaults conservadores y esas cuatro operaciones peligrosas permanecen desactivadas salvo configuración explícita. El Developer Agent de Sprint 1 no recibe herramientas y no puede modificar el repositorio.
 
+
+## One-Shot Autonomous Task Execution (Sprint 9)
+
+Sprint 9 conecta una única Issue autorizada con los servicios existentes:
+
+```text
+GitHub Issue
+  -> fanatic:ready
+  -> Task Intake (ONE task)
+  -> freshness and repository validation
+  -> Planner -> Developer Planning -> Reviewer -> QA
+  -> Controlled Implementation -> Docker verification
+  -> optional Promotion
+  -> optional Commit -> Push -> Pull Request
+  -> optional single read-only observation
+  -> STOP
+```
+
+La ejecución todavía se dispara manualmente y exige configuración explícita:
+
+```bash
+fanatic-agents autonomous run /ruta/al/repositorio \
+  --image python:3.12-slim \
+  --config projects/project.yaml
+```
+
+Para autorizar delivery además se necesita `--deliver`. Deben coincidir los
+dos niveles de consentimiento: la Issue conserva `fanatic:ready`, y el
+proyecto habilita `intake.enabled`, `permissions.read_issues`,
+`autonomy.enabled` y `permissions.autonomous_execution`. Promoción y
+delivery tienen gates adicionales independientes; todos sus defaults son
+`false`.
+
+`autonomy.max_tasks_per_run` sólo acepta `1`. No hay loop de tareas,
+reintentos ni autocorrección, y una ejecución hace como máximo cinco llamadas
+de modelo: Planner, Developer Planning, Reviewer, QA e Implementation, una por
+rol. Un rechazo detiene las fases posteriores.
+
+Antes de llamar agentes se vuelve a leer la Issue y se comprueban estado,
+labels e identidad. También se exige que branch y HEAD coincidan con el
+receipt de selección y que el working tree esté limpio. Fanatic Agents no hace
+pull, checkout, reset ni stash para reparar drift.
+
+El título y body de la Issue permanecen como datos no confiables separados de
+las instrucciones de seguridad en todos los prompts. No pueden ampliar
+permisos, introducir directamente comandos de verificación, solicitar secrets,
+habilitar red del sandbox, autorizar merge ni cambiar límites.
+
+Promoción usa exactamente el `ChangeSet` verificado y una rama determinística
+`fanatic/issue-<número>-<slug>`. Una colisión local o remota detiene el run;
+no se sobrescribe ni se inventa un sufijo. Delivery reutiliza staging exacto,
+commit, push y PR de Sprint 6. La observación posterior ocurre una sola vez,
+sin watch, polling ni sleeps.
+
+Sprint 9 nunca modifica la Issue, nunca hace merge y nunca hace deploy. Los

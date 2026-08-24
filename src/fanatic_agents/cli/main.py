@@ -43,6 +43,8 @@ from fanatic_agents.orchestrator.models import WorkflowResult
 from fanatic_agents.implementation.models import ImplementationResult
 from fanatic_agents.implementation.service import run_controlled_implementation
 from fanatic_agents.intake.models import TaskDiscoveryResult, TaskIntakeResult
+from fanatic_agents.autonomous.models import AutonomousRunResult
+from fanatic_agents.autonomous.service import run_once as run_autonomous_once
 from fanatic_agents.intake.service import (
     discover_tasks,
     select_task,
@@ -80,6 +82,10 @@ workflow_app = typer.Typer(
 app.add_typer(workflow_app, name="workflow")
 task_app = typer.Typer(help="Discover and locally reserve authorized tasks.")
 app.add_typer(task_app, name="task")
+autonomous_app = typer.Typer(
+    help="Run at most one authorized GitHub Issue through the safe workflow."
+)
+app.add_typer(autonomous_app, name="autonomous")
 
 
 @dataclass(frozen=True, slots=True)
@@ -963,6 +969,118 @@ def _render_task_intake(result: TaskIntakeResult) -> None:
         console.print(
             "\nFanatic Agents has selected work but has NOT started implementation."
         )
+
+
+@autonomous_app.command("run")
+def autonomous_run_command(
+    project: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=False,
+        resolve_path=False,
+        help="Local project repository for this one-shot run.",
+    ),
+    image: str = typer.Option(
+        ..., "--image", help="Locally available Docker verification image."
+    ),
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        help="Required project YAML with explicit intake and autonomy authorization.",
+    ),
+    deliver: bool = typer.Option(
+        False,
+        "--deliver",
+        help="Explicit delivery gate; config and permissions must also allow delivery.",
+    ),
+) -> None:
+    """Select and process no more than one task, then stop before merge."""
+    try:
+        project_config = load_project_config(config)
+    except (ConfigLoadError, ValidationError) as exc:
+        console.print("[red]Autonomous configuration is invalid:[/red]", Text(str(exc)))
+        raise typer.Exit(code=1) from exc
+
+    settings = get_settings()
+    if not settings.has_openai_api_key:
+        console.print(
+            "[red]Autonomous execution requires OPENAI_API_KEY; "
+            "no task was selected and no agent was called.[/red]"
+        )
+        raise typer.Exit(code=1)
+    try:
+        configure_openai_sdk(settings)
+        result = run_autonomous_once(
+            project_config,
+            image=image,
+            repository=project,
+            deliver=deliver,
+        )
+    except OpenAIConfigurationError as exc:
+        console.print("[red]Autonomous provider setup failed safely.[/red]")
+        raise typer.Exit(code=1) from exc
+    _render_autonomous_result(result)
+    if result.status not in {
+        "no_eligible_tasks",
+        "verified",
+        "promoted",
+        "delivered_for_review",
+        "waiting_for_ci",
+        "waiting_for_review",
+        "ready_for_human_merge",
+    }:
+        raise typer.Exit(code=1)
+
+
+def _render_autonomous_result(result: AutonomousRunResult) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Autonomous Run[/bold cyan]")
+    repository = result.github_repository or result.repository
+    console.print(f"\n[bold]Repository[/bold]\n{Text(repository)}")
+    task = (
+        f"#{result.issue_number} {result.task_title}"
+        if result.issue_number and result.task_title
+        else "NONE"
+    )
+    console.print(f"\n[bold]Task[/bold]\n{Text(task)}")
+    console.print(f"\n[bold]Priority[/bold]\n{(result.priority or 'none').upper()}")
+    console.print("\n[bold]Source trust[/bold]\nUNTRUSTED")
+    reservation = "CLAIMED" if result.task_status else "NOT CLAIMED"
+    console.print(f"\n[bold]Task reservation[/bold]\n{reservation}")
+    console.print(
+        f"\n[bold]Workflow[/bold]\n{(result.workflow_status or 'NOT PERFORMED').upper()}"
+    )
+    console.print(f"\n[bold]Model calls[/bold]\n{result.model_calls}")
+    console.print(
+        f"\n[bold]Implementation[/bold]\n"
+        f"{(result.implementation_status or 'NOT PERFORMED').upper()}"
+    )
+    console.print(
+        f"\n[bold]Promotion[/bold]\n{(result.promotion_status or 'NOT PERFORMED').upper()}"
+    )
+    console.print(f"\n[bold]Branch[/bold]\n{result.branch or 'NOT CREATED'}")
+    delivery = (
+        "DELIVERED_FOR_REVIEW"
+        if result.delivery_status == "delivered"
+        else (result.delivery_status or "NOT PERFORMED").upper()
+    )
+    console.print(f"\n[bold]Delivery[/bold]\n{delivery}")
+    pull_request = (
+        f"#{result.pr_number} {result.pr_url}"
+        if result.pr_number and result.pr_url
+        else "NOT CREATED"
+    )
+    console.print(f"\n[bold]Pull Request[/bold]\n{pull_request}")
+    console.print(
+        f"\n[bold]Observation[/bold]\n"
+        f"{(result.observation_status or 'NOT PERFORMED').upper()}"
+    )
+    console.print("\n[bold]Automatic merge[/bold]\nDISABLED")
+    console.print("\n[bold]Issue mutation[/bold]\nNONE")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
 
 
 if __name__ == "__main__":
