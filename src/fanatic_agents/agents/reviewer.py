@@ -8,8 +8,10 @@ from fanatic_agents.agents._shared import (
     SynchronousRunner,
     resolve_model,
     run_structured_agent,
+    untrusted_task_context,
 )
 from fanatic_agents.git.inspection import RepositorySnapshot
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import (
     DeveloperPlan,
     PlannerTask,
@@ -49,6 +51,7 @@ class ReviewerAgentService:
         snapshot: RepositorySnapshot,
         task: PlannerTask,
         plan: DeveloperPlan,
+        task_spec: TaskSpec | None = None,
     ) -> ReviewerDecision:
         prompt = (
             "Review this bounded, read-only proposal.\n\nRepository snapshot:\n"
@@ -57,6 +60,7 @@ class ReviewerAgentService:
             + task.model_dump_json(indent=2)
             + "\n\nDeveloper plan:\n"
             + plan.model_dump_json(indent=2)
+            + untrusted_task_context(task_spec)
         )
         return run_structured_agent(
             runner=self._runner,

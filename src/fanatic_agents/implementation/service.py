@@ -18,6 +18,7 @@ from fanatic_agents.implementation.models import (
     ImplementationStatus,
     WorkspaceSummary,
 )
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.implementation.policy import ChangePolicy
 from fanatic_agents.implementation.verification import PreparedWorkspaceSandbox
 from fanatic_agents.implementation.workspace import TemporaryImplementationWorkspace
@@ -42,6 +43,7 @@ class Implementer(Protocol):
         developer_plan: DeveloperPlan,
         reviewer: ReviewerDecision,
         qa: QAPlan,
+        task_spec: TaskSpec | None = None,
     ) -> ChangeSet: ...
 
 
@@ -111,14 +113,30 @@ class ControlledImplementationService:
             )
 
         try:
-            changeset = self._implementer.implement(
-                snapshot, planner_task, developer_plan, reviewer, qa
+            changeset = (
+                self._implementer.implement(
+                    snapshot, planner_task, developer_plan, reviewer, qa
+                )
+                if workflow.task_spec is None
+                else self._implementer.implement(
+                    snapshot, planner_task, developer_plan, reviewer, qa,
+                    workflow.task_spec,
+                )
             )
         except Exception:
             return _result_without_workspace(
                 task,
                 status="implementation_failed",
                 reason="Implementation Agent failed; no workspace changes were applied.",
+                base_repository_state=base_repository_state,
+            )
+        if changeset.task_title != planner_task.title:
+            return _result_without_workspace(
+                task,
+                status="policy_rejected",
+                reason=(
+                    "Implementation Agent changed the approved task identity."
+                ),
                 base_repository_state=base_repository_state,
             )
 

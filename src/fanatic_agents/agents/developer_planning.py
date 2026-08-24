@@ -8,8 +8,10 @@ from fanatic_agents.agents._shared import (
     SynchronousRunner,
     resolve_model,
     run_structured_agent,
+    untrusted_task_context,
 )
 from fanatic_agents.git.inspection import RepositorySnapshot
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import DeveloperPlan, PlannerTask
 
 DEVELOPER_PLANNING_INSTRUCTIONS = """
@@ -42,7 +44,10 @@ class DeveloperPlanningAgentService:
         return self._agent
 
     def plan(
-        self, snapshot: RepositorySnapshot, task: PlannerTask
+        self,
+        snapshot: RepositorySnapshot,
+        task: PlannerTask,
+        task_spec: TaskSpec | None = None,
     ) -> DeveloperPlan:
         prompt = (
             "Create a read-only implementation proposal from exactly this context.\n\n"
@@ -50,6 +55,7 @@ class DeveloperPlanningAgentService:
             + snapshot.model_dump_json(indent=2)
             + "\n\nSelected task:\n"
             + task.model_dump_json(indent=2)
+            + untrusted_task_context(task_spec)
         )
         return run_structured_agent(
             runner=self._runner,

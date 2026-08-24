@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +19,7 @@ from fanatic_agents.git.inspection import (
     SnapshotFile,
     SnapshotTruncation,
 )
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import (
     DeveloperPlan,
     PlannerOutput,
@@ -74,6 +76,22 @@ def _planner_output() -> PlannerOutput:
         status="task_selected",
         selected_task=_task(),
         planning_notes=["One task selected."],
+    )
+
+
+def _task_spec() -> TaskSpec:
+    return TaskSpec(
+        task_id="github:owner/repo#8",
+        repository="/repo",
+        issue_number=8,
+        issue_url="https://github.com/owner/repo/issues/8",
+        title="Original Issue title",
+        description="Implement the bounded Issue.",
+        labels=["fanatic:ready"],
+        priority="none",
+        base_branch="main",
+        base_commit_sha="a" * 40,
+        selected_at=datetime(2026, 8, 24, tzinfo=UTC),
     )
 
 
@@ -206,6 +224,21 @@ def test_each_service_uses_one_runner_turn() -> None:
     for used_runner in (runner, developer_runner, reviewer_runner, qa_runner):
         assert len(used_runner.calls) == 1
         assert used_runner.calls[0][2] == 1
+
+
+def test_task_aware_planner_prompt_requires_verbatim_source_task_id() -> None:
+    task_spec = _task_spec()
+    output = _planner_output().model_copy(
+        update={"source_task_id": task_spec.task_id}
+    )
+    runner = FakeRunner(output)
+
+    PlannerAgentService(runner=runner).plan(_snapshot(), task_spec)
+
+    prompt = runner.calls[0][1]
+    assert "Copy TaskSpec.task_id exactly and verbatim" in prompt
+    assert "PlannerOutput.source_task_id" in prompt
+    assert repr(task_spec.task_id) in prompt
 
 
 def test_agent_exception_is_sanitized() -> None:

@@ -39,6 +39,7 @@ class PermissionsConfig(StrictModel):
     push_branch: bool = False
     create_pull_request: bool = False
     observe_pull_request: bool = False
+    autonomous_execution: bool = False
 
     merge: bool = False
     production_deploy: bool = False
@@ -72,12 +73,28 @@ class IntakeConfig(StrictModel):
         return self
 
 
+class AutonomyConfig(StrictModel):
+    """Deny-by-default controls for one manually triggered autonomous pass."""
+
+    enabled: bool = False
+    max_tasks_per_run: Literal[1] = 1
+    auto_promote: bool = False
+    auto_deliver: bool = False
+    observe_after_delivery: bool = True
+
+    @model_validator(mode="after")
+    def validate_delivery_requires_promotion(self) -> "AutonomyConfig":
+        if self.auto_deliver and not self.auto_promote:
+            raise ValueError("autonomy.auto_deliver requires autonomy.auto_promote")
+        return self
+
 class ProjectConfig(StrictModel):
     """Complete, validated configuration for one managed project."""
 
     project: ProjectInfo
     repository: RepositoryConfig
     intake: IntakeConfig = Field(default_factory=IntakeConfig)
+    autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
     commands: CommandConfig
     limits: LimitsConfig
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)

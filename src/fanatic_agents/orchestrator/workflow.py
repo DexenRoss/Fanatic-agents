@@ -9,6 +9,7 @@ from fanatic_agents.agents.planner import PlannerAgentService
 from fanatic_agents.agents.qa import QAAgentService
 from fanatic_agents.agents.reviewer import ReviewerAgentService
 from fanatic_agents.git.inspection import RepositorySnapshot
+from fanatic_agents.intake.models import TaskSpec
 from fanatic_agents.orchestrator.models import (
     CommandValidation,
     DeveloperPlan,
@@ -25,12 +26,17 @@ from fanatic_agents.sandbox.policy import CommandPolicy
 
 
 class Planner(Protocol):
-    def plan(self, snapshot: RepositorySnapshot) -> PlannerOutput: ...
+    def plan(
+        self, snapshot: RepositorySnapshot, task_spec: TaskSpec | None = None
+    ) -> PlannerOutput: ...
 
 
 class DeveloperPlanner(Protocol):
     def plan(
-        self, snapshot: RepositorySnapshot, task: PlannerTask
+        self,
+        snapshot: RepositorySnapshot,
+        task: PlannerTask,
+        task_spec: TaskSpec | None = None,
     ) -> DeveloperPlan: ...
 
 
@@ -40,6 +46,7 @@ class Reviewer(Protocol):
         snapshot: RepositorySnapshot,
         task: PlannerTask,
         plan: DeveloperPlan,
+        task_spec: TaskSpec | None = None,
     ) -> ReviewerDecision: ...
 
 
@@ -50,6 +57,7 @@ class QualityPlanner(Protocol):
         task: PlannerTask,
         developer_plan: DeveloperPlan,
         reviewer: ReviewerDecision,
+        task_spec: TaskSpec | None = None,
     ) -> QAPlan: ...
 
 
@@ -71,27 +79,60 @@ class WorkflowOrchestrator:
         self._qa = qa or QAAgentService()
         self._command_policy = command_policy or CommandPolicy()
 
-    def run(self, snapshot: RepositorySnapshot) -> WorkflowResult:
+    def run(
+        self, snapshot: RepositorySnapshot, task_spec: TaskSpec | None = None
+    ) -> WorkflowResult:
+        result = self._run(snapshot, task_spec)
+        return result.model_copy(update={"task_spec": task_spec})
+
+    def _run(
+        self, snapshot: RepositorySnapshot, task_spec: TaskSpec | None
+    ) -> WorkflowResult:
         """Run at most one call per role and never execute a proposed command."""
         repository = RepositorySnapshotMetadata.from_snapshot(snapshot)
+        model_calls = 0
+
+        def workflow_result(**values: object) -> WorkflowResult:
+            return WorkflowResult.model_validate({**values, "model_calls": model_calls})
+
         if not snapshot.has_agent_context():
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 status="insufficient_context",
                 stop_reason="The repository snapshot has insufficient agent context.",
             )
 
+        model_calls += 1
         try:
-            planner_output = self._planner.plan(snapshot)
+            planner_output = (
+                self._planner.plan(snapshot)
+                if task_spec is None
+                else self._planner.plan(snapshot, task_spec)
+            )
         except Exception:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 status="failed",
                 stop_reason="Planner Agent failed; later agents were not called.",
             )
-
+        if planner_output is None:
+            return workflow_result(
+                repository=repository,
+                status="failed",
+                stop_reason="Planner Agent returned no output; later agents were not called.",
+            )
+        if (
+            task_spec is not None
+            and planner_output.source_task_id != task_spec.task_id
+        ):
+            return workflow_result(
+                repository=repository,
+                planner=planner_output,
+                status="failed",
+                stop_reason="Planner changed the selected task identity; later agents were not called.",
+            )
         if planner_output.status == "insufficient_context":
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 status="insufficient_context",
@@ -100,31 +141,36 @@ class WorkflowOrchestrator:
 
         task = planner_output.selected_task
         if task is None:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 status="failed",
                 stop_reason="Planner returned no selected task.",
             )
         if task.requires_human_approval:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 status="human_required",
                 stop_reason="Planner task requires human approval.",
             )
         if task.risk_level == "high":
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 status="human_required",
                 stop_reason="High-risk Planner task requires human approval.",
             )
 
+        model_calls += 1
         try:
-            developer_plan = self._developer.plan(snapshot, task)
+            developer_plan = (
+                self._developer.plan(snapshot, task)
+                if task_spec is None
+                else self._developer.plan(snapshot, task, task_spec)
+            )
         except Exception:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 status="failed",
@@ -132,7 +178,7 @@ class WorkflowOrchestrator:
             )
 
         if developer_plan.requires_human_approval:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 developer=developer_plan,
@@ -144,7 +190,7 @@ class WorkflowOrchestrator:
             developer_plan.proposed_commands
         )
         if any(not validation.valid for validation in developer_validations):
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 developer=developer_plan,
@@ -156,12 +202,17 @@ class WorkflowOrchestrator:
                 ),
             )
 
+        model_calls += 1
         try:
-            reviewer_decision = self._reviewer.review(
-                snapshot, task, developer_plan
+            reviewer_decision = (
+                self._reviewer.review(snapshot, task, developer_plan)
+                if task_spec is None
+                else self._reviewer.review(
+                    snapshot, task, developer_plan, task_spec
+                )
             )
         except Exception:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 developer=developer_plan,
@@ -171,7 +222,7 @@ class WorkflowOrchestrator:
             )
 
         if reviewer_decision.decision == "changes_requested":
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 developer=developer_plan,
@@ -181,7 +232,7 @@ class WorkflowOrchestrator:
                 stop_reason="Reviewer requested changes; QA was not called.",
             )
         if reviewer_decision.decision == "human_required":
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 developer=developer_plan,
@@ -191,12 +242,17 @@ class WorkflowOrchestrator:
                 stop_reason="Reviewer requires a human decision; QA was not called.",
             )
 
+        model_calls += 1
         try:
-            qa_plan = self._qa.plan(
-                snapshot, task, developer_plan, reviewer_decision
+            qa_plan = (
+                self._qa.plan(snapshot, task, developer_plan, reviewer_decision)
+                if task_spec is None
+                else self._qa.plan(
+                    snapshot, task, developer_plan, reviewer_decision, task_spec
+                )
             )
         except Exception:
-            return WorkflowResult(
+            return workflow_result(
                 repository=repository,
                 planner=planner_output,
                 developer=developer_plan,
@@ -217,13 +273,13 @@ class WorkflowOrchestrator:
             "qa_command_validations": qa_validations,
         }
         if qa_plan.readiness == "human_required":
-            return WorkflowResult(
+            return workflow_result(
                 **common,
                 status="human_required",
                 stop_reason="QA plan requires human attention.",
             )
         if any(not validation.valid for validation in qa_validations):
-            return WorkflowResult(
+            return workflow_result(
                 **common,
                 status="changes_requested",
                 stop_reason=(
@@ -232,12 +288,12 @@ class WorkflowOrchestrator:
                 ),
             )
         if qa_plan.readiness == "needs_attention":
-            return WorkflowResult(
+            return workflow_result(
                 **common,
                 status="changes_requested",
                 stop_reason="QA plan needs attention before implementation.",
             )
-        return WorkflowResult(**common, status="ready_for_implementation")
+        return workflow_result(**common, status="ready_for_implementation")
 
     def _validate_commands(
         self, commands: list[SandboxCommand]
