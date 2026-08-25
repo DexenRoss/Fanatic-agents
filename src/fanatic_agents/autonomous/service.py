@@ -195,11 +195,16 @@ class AutonomousRunner:
         started: datetime,
         run_lock: object,
     ) -> AutonomousRunResult:
+        excluded = (
+            self._task_receipts.non_reselectable_issue_numbers(repository)
+            | self._run_receipts.non_reselectable_issue_numbers(repository)
+        )
         intake = self._intake.select(
             repository,
             intake_config=config.intake,
             permissions=config.permissions,
             configured_repository=Path(config.repository.path),
+            excluded_issue_numbers=excluded,
         )
         if intake.status != "task_selected" or intake.selected_task is None:
             status = (

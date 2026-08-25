@@ -7,8 +7,11 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from fanatic_agents.core.config import IntakeConfig, PermissionsConfig
 from fanatic_agents.github.client import GitHubPreflight
+from fanatic_agents.intake.models import TaskIntakeReceipt
 from fanatic_agents.intake.receipt import TaskIntakeReceiptStore
 from fanatic_agents.intake.service import TaskIntakeService
 
@@ -299,6 +302,58 @@ def test_https_and_ssh_origins_are_resolved(tmp_path: Path) -> None:
             repository, [payload(1)], tmp_path / f"metadata-{index}", origin=origin
         )
         assert intake.discover(repository).github_repository == "owner/repo"
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    ["failed", "cancelled", "merged_externally", "completed"],
+)
+def test_automatic_exclusion_skips_terminal_older_priority_task(
+    tmp_path: Path, terminal_status: str,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    metadata = tmp_path / "metadata"
+    issues = [
+        payload(
+            9,
+            labels=["fanatic:ready", "priority:p0"],
+            created="2026-08-20T00:00:00Z",
+        ),
+        payload(
+            11,
+            labels=["fanatic:ready", "priority:p0"],
+            created="2026-08-24T00:00:00Z",
+        ),
+    ]
+    store = TaskIntakeReceiptStore(metadata_root=metadata)
+    receipt = TaskIntakeReceipt(
+        repository=str(repository.resolve()),
+        github_repository="owner/repo",
+        issue_number=9,
+        issue_url="https://github.com/owner/repo/issues/9",
+        title="Task 9",
+        selected_priority="p0",
+        labels=["fanatic:ready", "priority:p0"],
+        base_branch="feature/base",
+        base_commit_sha="a" * 40,
+        selected_at=datetime(2026, 8, 20, tzinfo=UTC),
+        task_status=terminal_status,
+    )
+    receipt_path = store.save(receipt)
+    historical_receipt = receipt_path.read_bytes()
+
+    automatic, git, github = service(repository, issues, metadata)
+    excluded = store.non_reselectable_issue_numbers(repository)
+    second = automatic.select(
+        repository, excluded_issue_numbers=excluded
+    )
+    assert second.status == "task_selected"
+    assert second.selected_task is not None
+    assert second.selected_task.issue_number == 11
+    assert store.load(repository, 9).task_status == terminal_status
+    assert receipt_path.read_bytes() == historical_receipt
+    assert_read_only_calls(git, github)
 
 
 def assert_read_only_calls(git: FakeGit, github: FakeGitHub) -> None:

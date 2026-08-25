@@ -30,6 +30,7 @@ class TaskIntakePolicy:
         issue: GitHubIssueCandidate,
         *,
         active_issue_numbers: set[int] | None = None,
+        excluded_issue_numbers: set[int] | None = None,
     ) -> CandidateAssessment:
         labels = {label.casefold() for label in issue.labels}
         priority_labels = labels & set(PRIORITY_LABELS)
@@ -48,6 +49,10 @@ class TaskIntakePolicy:
         if issue.number in (active_issue_numbers or set()):
             return _assessment(
                 issue, "ineligible", "duplicate_active_receipt", priority
+            )
+        if issue.number in (excluded_issue_numbers or set()):
+            return _assessment(
+                issue, "ineligible", "manual_intervention_required", priority
             )
         return _assessment(issue, "eligible", "eligible", priority)
 

@@ -527,3 +527,67 @@ commit, push y PR de Sprint 6. La observación posterior ocurre una sola vez,
 sin watch, polling ni sleeps.
 
 Sprint 9 nunca modifica la Issue, nunca hace merge y nunca hace deploy. Los
+receipts externos avanzan monotonicamente y un estado fallido no se recupera
+ni se vuelve a ejecutar de forma implicita.
+
+
+## Safe Autonomous Scheduler (Sprint 10)
+
+Sprint 10 elimina el disparo manual por tarea mediante un scheduler foreground:
+
+```text
+Human creates Issue
+  -> fanatic:ready
+  -> Scheduler notices it
+  -> AutonomousRunner
+  -> Pull Request
+  -> Scheduler observes once per cycle
+  -> Human merge
+  -> Scheduler detects MERGED_EXTERNALLY
+  -> next cycle may select the next task
+```
+
+Se ejecuta una vez y permanece en primer plano hasta `Ctrl+C`:
+
+```bash
+fanatic-agents scheduler run /ruta/al/repositorio \
+  --config projects/project.yaml \
+  --image python:3.12-slim \
+  --deliver
+```
+
+`--max-cycles N` limita una invocacion para pruebas u operacion controlada.
+El scheduler duerme `scheduler.interval_minutes` entre ciclos y nunca duerme
+despues del ultimo ciclo. No instala systemd, cron, launchd ni Windows Service,
+por lo que todavia no sobrevive automaticamente a un reboot.
+
+La autorizacion conserva todos los gates. Se requieren
+`scheduler.enabled`, `autonomy.enabled`, `intake.enabled`,
+`permissions.read_issues` y `permissions.autonomous_execution`. Promotion
+sigue exigiendo `auto_promote` y `create_branch`; delivery exige ademas
+`autonomy.auto_deliver`, `--deliver`, `commit`, `push_branch` y
+`create_pull_request`. Todos los defaults siguen siendo `false`.
+
+Solo puede existir una tarea activa por repositorio. Estados de implementacion
+o PR pendientes bloquean cualquier seleccion nueva; los PR entregados reciben
+como maximo una observacion read-only por ciclo. `max_tasks_per_day` cuenta
+en UTC unicamente tareas realmente claimed. Los ciclos sin Issues elegibles no
+son errores. Los errores transitorios esperan al siguiente intervalo y el loop
+se detiene al alcanzar `max_consecutive_errors`.
+
+Las Issues continuan siendo creadas y autorizadas por humanos. El scheduler no
+crea, edita, comenta, etiqueta, asigna ni cierra Issues. Sprint 10 no inventa
+contabilidad monetaria para `max_daily_cost_usd`: todavia no existe telemetria
+de coste suficiente para aplicarla con exactitud. Los receipts terminales
+locales (`failed`, `cancelled`, `merged_externally` y `completed`) son
+autoritativos aunque la Issue siga abierta y `fanatic:ready`: intake y
+autonomous los excluyen antes del ranking. CI fallida o cambios solicitados
+requieren intervencion humana y nunca activan retry, correction loop ni nuevas
+llamadas de agente. El scheduler anade cero
+llamadas de modelo; cada tarea conserva el maximo de cinco del
+`AutonomousRunner`.
+
+Sprint 10 no hace merge ni deploy. `READY_FOR_HUMAN_MERGE` espera
+indefinidamente una decision humana y `MERGED_EXTERNALLY` solo reconcilia los
+receipts. El estado y el lock `.scheduler.lock` son atomicos, externos al
+repositorio y separados de `.autonomous.lock`.
