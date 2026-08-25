@@ -88,6 +88,15 @@ class AutonomyConfig(StrictModel):
             raise ValueError("autonomy.auto_deliver requires autonomy.auto_promote")
         return self
 
+
+class SchedulerConfig(StrictModel):
+    """Deny-by-default controls for the foreground autonomous scheduler."""
+
+    enabled: bool = False
+    interval_minutes: int = Field(default=15, strict=True, ge=1, le=1440)
+    max_consecutive_errors: int = Field(default=3, strict=True, ge=1, le=20)
+
+
 class ProjectConfig(StrictModel):
     """Complete, validated configuration for one managed project."""
 
@@ -95,6 +104,7 @@ class ProjectConfig(StrictModel):
     repository: RepositoryConfig
     intake: IntakeConfig = Field(default_factory=IntakeConfig)
     autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     commands: CommandConfig
     limits: LimitsConfig
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)

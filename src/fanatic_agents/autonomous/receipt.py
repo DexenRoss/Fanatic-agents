@@ -19,6 +19,7 @@ from fanatic_agents.autonomous.models import (
 )
 from fanatic_agents.intake.receipt import TaskIntakeReceiptStore
 
+NON_RESELECTABLE_AUTONOMOUS_STATUSES = {"failed", "merged_externally"}
 LOCK_STALE_SECONDS = 60 * 60
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "selected": {"running", "failed"},
@@ -30,10 +31,16 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
         "waiting_for_review",
         "ready_for_human_merge",
         "merged_externally",
+        "failed",
     },
-    "waiting_for_ci": set(),
-    "waiting_for_review": set(),
-    "ready_for_human_merge": set(),
+    "waiting_for_ci": {
+        "waiting_for_review", "ready_for_human_merge",
+        "merged_externally", "failed",
+    },
+    "waiting_for_review": {
+        "ready_for_human_merge", "merged_externally", "failed",
+    },
+    "ready_for_human_merge": {"merged_externally", "failed"},
     "merged_externally": set(),
     "failed": set(),
 }
@@ -79,6 +86,51 @@ class AutonomousRunReceiptStore:
         if issue_number <= 0:
             raise ValueError("issue_number must be greater than zero")
         return self.directory(repository) / f"issue-{issue_number}.json"
+
+    def list_for_repository(self, repository: Path) -> list[AutonomousRunReceipt]:
+        """Load every autonomous receipt for one repository or fail closed."""
+        directory = self.directory(repository)
+        if not directory.exists():
+            return []
+        if directory.is_symlink() or not directory.is_dir():
+            raise AutonomousReceiptError(
+                "Autonomous metadata must be a real external directory."
+            )
+        resolved = Path(repository).expanduser().resolve(strict=True)
+        receipts: list[AutonomousRunReceipt] = []
+        try:
+            for path in sorted(directory.glob("issue-*.json")):
+                if path.is_symlink() or not path.is_file():
+                    raise AutonomousReceiptError(
+                        "Autonomous run metadata is invalid."
+                    )
+                receipt = AutonomousRunReceipt.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                if (
+                    Path(receipt.repository).expanduser().resolve(strict=True)
+                    != resolved
+                    or path != self.path_for(resolved, receipt.issue_number)
+                ):
+                    raise AutonomousReceiptError(
+                        "Autonomous run metadata is invalid."
+                    )
+                receipts.append(receipt)
+        except AutonomousReceiptError:
+            raise
+        except (OSError, UnicodeError, ValidationError, ValueError) as exc:
+            raise AutonomousReceiptError(
+                "Autonomous run metadata is invalid."
+            ) from exc
+        return receipts
+
+    def non_reselectable_issue_numbers(self, repository: Path) -> set[int]:
+        """Return Issues whose terminal lifecycle forbids automatic selection."""
+        return {
+            receipt.issue_number
+            for receipt in self.list_for_repository(repository)
+            if receipt.task_status in NON_RESELECTABLE_AUTONOMOUS_STATUSES
+        }
 
     def save(self, receipt: AutonomousRunReceipt) -> Path:
         path = self.path_for(Path(receipt.repository), receipt.issue_number)

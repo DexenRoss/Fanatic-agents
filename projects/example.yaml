@@ -53,3 +53,8 @@ autonomy:
   auto_promote: false
   auto_deliver: false
   observe_after_delivery: true
+
+scheduler:
+  enabled: false
+  interval_minutes: 15
+  max_consecutive_errors: 3

@@ -153,6 +153,7 @@ class TaskIntakeService:
         intake_config: IntakeConfig | None = None,
         permissions: PermissionsConfig | None = None,
         configured_repository: Path | None = None,
+        excluded_issue_numbers: set[int] | None = None,
     ) -> TaskIntakeResult:
         requested = _requested_path(repository)
         denied = _authorization_failure(intake_config, permissions)
@@ -173,7 +174,11 @@ class TaskIntakeService:
                 policy = TaskIntakePolicy(config)
                 assessments = [
                     *(
-                        policy.evaluate(issue, active_issue_numbers=active)
+                        policy.evaluate(
+                            issue,
+                            active_issue_numbers=active,
+                            excluded_issue_numbers=excluded_issue_numbers,
+                        )
                         for issue in issues
                     ),
                     *invalid,

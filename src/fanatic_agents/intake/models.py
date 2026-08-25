@@ -21,6 +21,7 @@ DecisionReason = Literal[
     "closed",
     "ambiguous_priority",
     "duplicate_active_receipt",
+    "manual_intervention_required",
     "invalid_issue",
 ]
 TaskIntakeStatus = Literal[

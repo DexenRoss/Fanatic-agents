@@ -45,6 +45,8 @@ from fanatic_agents.implementation.service import run_controlled_implementation
 from fanatic_agents.intake.models import TaskDiscoveryResult, TaskIntakeResult
 from fanatic_agents.autonomous.models import AutonomousRunResult
 from fanatic_agents.autonomous.service import run_once as run_autonomous_once
+from fanatic_agents.scheduler.models import SchedulerRunResult
+from fanatic_agents.scheduler.service import SchedulerService
 from fanatic_agents.intake.service import (
     discover_tasks,
     select_task,
@@ -86,6 +88,10 @@ autonomous_app = typer.Typer(
     help="Run at most one authorized GitHub Issue through the safe workflow."
 )
 app.add_typer(autonomous_app, name="autonomous")
+scheduler_app = typer.Typer(
+    help="Run safe foreground scheduling for one authorized repository."
+)
+app.add_typer(scheduler_app, name="scheduler")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1078,6 +1084,101 @@ def _render_autonomous_result(result: AutonomousRunResult) -> None:
     )
     console.print("\n[bold]Automatic merge[/bold]\nDISABLED")
     console.print("\n[bold]Issue mutation[/bold]\nNONE")
+    console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
+    if result.stop_reason:
+        console.print(Text(result.stop_reason))
+
+
+@scheduler_app.command("run")
+def scheduler_run_command(
+    project: Path = typer.Argument(
+        ..., exists=False, file_okay=False, dir_okay=True,
+        readable=False, resolve_path=False,
+        help="Local project repository for foreground scheduling.",
+    ),
+    image: str = typer.Option(
+        ..., "--image", help="Locally available Docker verification image."
+    ),
+    config: Path = typer.Option(
+        ..., "--config",
+        help="Required project YAML with explicit scheduler authorization.",
+    ),
+    deliver: bool = typer.Option(
+        False, "--deliver",
+        help="Explicit delivery gate; config and permissions must also allow it.",
+    ),
+    max_cycles: int | None = typer.Option(
+        None, "--max-cycles", min=1,
+        help="Stop after this many cycles; omit to run until interrupted.",
+    ),
+) -> None:
+    """Run a single-threaded scheduler; never create Issues or merge PRs."""
+    try:
+        project_config = load_project_config(config)
+    except (ConfigLoadError, ValidationError) as exc:
+        console.print(
+            "[red]Scheduler configuration is invalid:[/red]", Text(str(exc))
+        )
+        raise typer.Exit(code=1) from exc
+
+    scheduler_authorized = (
+        project_config.scheduler.enabled
+        and project_config.autonomy.enabled
+        and project_config.intake.enabled
+        and project_config.permissions.read_issues
+        and project_config.permissions.autonomous_execution
+    )
+    if scheduler_authorized:
+        settings = get_settings()
+        if not settings.has_openai_api_key:
+            console.print(
+                "[red]Scheduler execution requires OPENAI_API_KEY; "
+                "no task was selected and no agent was called.[/red]"
+            )
+            raise typer.Exit(code=1)
+        try:
+            configure_openai_sdk(settings)
+        except OpenAIConfigurationError as exc:
+            console.print("[red]Scheduler provider setup failed safely.[/red]")
+            raise typer.Exit(code=1) from exc
+
+    result = SchedulerService().run_forever(
+        project_config,
+        image=image,
+        repository=project,
+        deliver=deliver,
+        max_cycles=max_cycles,
+    )
+    _render_scheduler_result(result)
+    if (
+        result.status not in {"max_cycles_reached", "stopped_by_user"}
+        or result.last_cycle_status
+        in {
+            "github_unavailable",
+            "scheduler_error",
+            "too_many_consecutive_errors",
+        }
+    ):
+        raise typer.Exit(code=1)
+
+
+def _render_scheduler_result(result: SchedulerRunResult) -> None:
+    console.print("\n[bold cyan]Fanatic Agents Scheduler[/bold cyan]")
+    console.print(f"\n[bold]Repository[/bold]\n{Text(result.repository)}")
+    console.print(f"\n[bold]Cycles executed[/bold]\n{result.cycles_executed}")
+    console.print(
+        f"\n[bold]Tasks started today (UTC)[/bold]\n"
+        f"{result.tasks_started_today}"
+    )
+    console.print(
+        f"\n[bold]Consecutive errors[/bold]\n{result.consecutive_errors}"
+    )
+    console.print(
+        f"\n[bold]Last cycle[/bold]\n"
+        f"{(result.last_cycle_status or 'NOT RUN').upper()}"
+    )
+    console.print("\n[bold]Issue mutation[/bold]\nNONE")
+    console.print("\n[bold]Automatic merge[/bold]\nDISABLED")
     console.print(f"\n[bold]Final Status[/bold]\n{result.final_status}")
     if result.stop_reason:
         console.print(Text(result.stop_reason))

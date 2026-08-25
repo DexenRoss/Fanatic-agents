@@ -27,6 +27,12 @@ ACTIVE_TASK_STATUSES = {
     "waiting_for_review",
     "ready_for_human_merge",
 }
+NON_RESELECTABLE_TASK_STATUSES = {
+    "failed",
+    "cancelled",
+    "merged_externally",
+    "completed",
+}
 
 
 class TaskIntakeReceiptError(RuntimeError):
@@ -78,6 +84,43 @@ class TaskIntakeReceiptStore:
         if issue_number <= 0:
             raise ValueError("issue_number must be greater than zero")
         return self.directory(repository) / f"issue-{issue_number}.json"
+
+    def list_for_repository(self, repository: Path) -> list[TaskIntakeReceipt]:
+        """Load every receipt for one repository or fail closed."""
+        directory = self.directory(repository)
+        if not directory.exists():
+            return []
+        if directory.is_symlink() or not directory.is_dir():
+            raise TaskIntakeReceiptError("Task metadata must be a real directory.")
+        resolved = Path(repository).expanduser().resolve(strict=True)
+        receipts: list[TaskIntakeReceipt] = []
+        try:
+            for path in sorted(directory.glob("issue-*.json")):
+                if path.is_symlink() or not path.is_file():
+                    raise TaskIntakeReceiptError("Task intake metadata is invalid.")
+                receipt = TaskIntakeReceipt.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                if (
+                    Path(receipt.repository).expanduser().resolve(strict=True)
+                    != resolved
+                    or path != self.path_for(resolved, receipt.issue_number)
+                ):
+                    raise TaskIntakeReceiptError("Task intake metadata is invalid.")
+                receipts.append(receipt)
+        except TaskIntakeReceiptError:
+            raise
+        except (OSError, UnicodeError, ValidationError, ValueError) as exc:
+            raise TaskIntakeReceiptError("Task intake metadata is invalid.") from exc
+        return receipts
+
+    def non_reselectable_issue_numbers(self, repository: Path) -> set[int]:
+        """Return Issues whose terminal lifecycle forbids automatic selection."""
+        return {
+            receipt.issue_number
+            for receipt in self.list_for_repository(repository)
+            if receipt.task_status in NON_RESELECTABLE_TASK_STATUSES
+        }
 
     def active_issue_numbers(
         self, repository: Path, github_repository: str
@@ -150,8 +193,16 @@ class TaskIntakeReceiptStore:
             "promoted": {"delivered", "failed"},
             "delivered": {
                 "waiting_for_ci", "waiting_for_review",
-                "ready_for_human_merge", "merged_externally",
+                "ready_for_human_merge", "merged_externally", "failed",
             },
+            "waiting_for_ci": {
+                "waiting_for_review", "ready_for_human_merge",
+                "merged_externally", "failed",
+            },
+            "waiting_for_review": {
+                "ready_for_human_merge", "merged_externally", "failed",
+            },
+            "ready_for_human_merge": {"merged_externally", "failed"},
         }
         if status not in allowed.get(receipt.task_status, set()):
             raise TaskIntakeReceiptError(
