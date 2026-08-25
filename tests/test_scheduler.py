@@ -554,6 +554,7 @@ def test_state_and_lock_use_private_permissions(tmp_path: Path) -> None:
 
 
 def test_scheduler_cli_help_exposes_required_boundary() -> None:
+    from click import unstyle
     from typer.testing import CliRunner
 
     from fanatic_agents.cli.main import app
@@ -563,7 +564,9 @@ def test_scheduler_cli_help_exposes_required_boundary() -> None:
     command = runner.invoke(app, ["scheduler", "run", "--help"])
     assert group.exit_code == 0
     assert command.exit_code == 0
-    assert "--config" in command.stdout
-    assert "--image" in command.stdout
-    assert "--deliver" in command.stdout
-    assert "--max-cycles" in command.stdout
+
+    stdout = unstyle(command.stdout)
+    assert "--config" in stdout
+    assert "--image" in stdout
+    assert "--deliver" in stdout
+    assert "--max-cycles" in stdout
