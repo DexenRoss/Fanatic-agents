@@ -5,6 +5,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def no_color_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Rich/Typer CLI assertions deterministic across terminals and CI."""
+    monkeypatch.setenv("NO_COLOR", "1")
+
+
 @pytest.fixture()
 def valid_config_data() -> dict[str, object]:
     return {
@@ -50,4 +56,3 @@ def valid_config_data() -> dict[str, object]:
 @pytest.fixture()
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
