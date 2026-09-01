@@ -591,3 +591,96 @@ Sprint 10 no hace merge ni deploy. `READY_FOR_HUMAN_MERGE` espera
 indefinidamente una decision humana y `MERGED_EXTERNALLY` solo reconcilia los
 receipts. El estado y el lock `.scheduler.lock` son atomicos, externos al
 repositorio y separados de `.autonomous.lock`.
+
+## Managed Background Service (Sprint 11)
+
+Sprint 11 adds a management layer around the existing scheduler. It does not
+implement a second scheduler or bypass any Sprint 0-10 safety gate:
+
+```text
+Human creates Issue
+  -> fanatic:ready
+  -> systemd user service
+  -> SchedulerService.run_forever()
+  -> AutonomousRunner
+  -> Pull Request
+  -> Human merge
+  -> Scheduler reconciliation
+```
+
+The only supported manager in this sprint is `systemd --user` on Linux, or
+inside a WSL distribution where systemd and the user manager are available.
+The platform check is read-only and does not install, enable, or start anything:
+
+```bash
+fanatic-agents service check
+```
+
+Managed operation is disabled by default and requires four independent config
+gates: `service.enabled`, `scheduler.enabled`, `autonomy.enabled`, and
+`intake.enabled`, plus the existing permissions.
+
+Installation is explicit. It writes one deterministic unit under
+`~/.config/systemd/user/` (or the XDG equivalent), and a private receipt under
+the external `.fanatic-agents-worktrees/.metadata/service/` namespace:
+
+```bash
+fanatic-agents service install /absolute/repository/path \
+  --config /absolute/project.yaml \
+  --image python:3.12-slim
+```
+
+Install does **not** enable or start the service by default. Each action needs a
+separate human flag:
+
+```bash
+fanatic-agents service install /absolute/repository/path \
+  --config /absolute/project.yaml \
+  --image python:3.12-slim \
+  --enable \
+  --start
+```
+
+Persistent delivery consent remains separate: add `--deliver` only when
+`autonomy.auto_deliver`, `permissions.commit`,
+`permissions.push_branch`, and `permissions.create_pull_request` are also
+enabled. This never authorizes automatic merge or deployment.
+
+Lifecycle operations target only the exact unit recorded in the receipt:
+
+```bash
+fanatic-agents service start /absolute/repository/path
+fanatic-agents service stop /absolute/repository/path
+fanatic-agents service status /absolute/repository/path
+fanatic-agents service uninstall /absolute/repository/path
+```
+
+A repeated install is rejected unless `--replace` is explicit, and replacement
+is allowed only for the previously validated Fanatic Agents unit. Stop and
+uninstall do not modify Issue, PR, branch, worktree, or task lifecycle receipts;
+a task such as `waiting_for_review` remains available for later reconciliation.
+
+The unit invokes the absolute Fanatic Agents executable through the private
+`service run-managed` boundary. Before scheduling, that boundary validates the
+receipt, repository path and GitHub origin, configured main branch, executable,
+unit hash, and SHA-256 of the exact YAML file. Any config or unit change fails
+closed; reinstall with `--replace` is the explicit way to accept a new config.
+The unit always contains `Restart=no`, so a security failure, invalid config,
+ambiguous metadata, or `TOO_MANY_CONSECUTIVE_ERRORS` remains stopped until a
+human acts.
+
+Secrets are never copied into the unit, receipt, CLI arguments, or logs. An
+optional `--env-file /absolute/private.env` stores only the path. The file must
+be a regular non-symlink file, owned by the current user where ownership can be
+checked, and not world-readable. Process environment variables retain their
+normal precedence.
+
+Linux user services can start as part of the applicable user-manager session.
+Under WSL, systemd manages the service only while that distribution and user
+manager exist. Sprint 11 does **not** start WSL automatically at Windows boot
+and does not install Windows Task Scheduler, a Windows Service, linger, cron,
+launchd, a system service, or any root-level unit.
+
+All earlier safeguards remain unchanged: humans create Issues and merge PRs;
+there is no Issue mutation, automatic retry, automatic systemd restart,
+automatic merge, or deployment.

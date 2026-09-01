@@ -64,4 +64,5 @@ def test_example_yaml_loads(project_root: Path) -> None:
 
     assert config.project.name == "example-project"
     assert config.commands.test == ['echo "tests"']
+    assert config.service.enabled is False
 

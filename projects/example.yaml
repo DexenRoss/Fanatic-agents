@@ -58,3 +58,7 @@ scheduler:
   enabled: false
   interval_minutes: 15
   max_consecutive_errors: 3
+
+service:
+  enabled: false
+  manager: systemd_user
