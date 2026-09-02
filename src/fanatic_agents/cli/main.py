@@ -47,6 +47,7 @@ from fanatic_agents.autonomous.models import AutonomousRunResult
 from fanatic_agents.autonomous.service import run_once as run_autonomous_once
 from fanatic_agents.scheduler.models import SchedulerRunResult
 from fanatic_agents.scheduler.service import SchedulerService
+from fanatic_agents.service.cli import service_app
 from fanatic_agents.intake.service import (
     discover_tasks,
     select_task,
@@ -92,6 +93,7 @@ scheduler_app = typer.Typer(
     help="Run safe foreground scheduling for one authorized repository."
 )
 app.add_typer(scheduler_app, name="scheduler")
+app.add_typer(service_app, name="service")
 
 
 @dataclass(frozen=True, slots=True)

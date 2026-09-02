@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field, SecretStr, field_validator
@@ -50,6 +51,8 @@ class ApplicationSettings(BaseSettings):
         return self.openai_api_key.get_secret_value()
 
 
-def get_settings() -> ApplicationSettings:
-    """Load settings from the process environment and current-directory `.env`."""
-    return ApplicationSettings()
+def get_settings(*, env_file: str | Path | None = None) -> ApplicationSettings:
+    """Load settings from the environment and an explicit or local dotenv file."""
+    if env_file is None:
+        return ApplicationSettings()
+    return ApplicationSettings(_env_file=Path(env_file))

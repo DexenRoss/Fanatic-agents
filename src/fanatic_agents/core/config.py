@@ -97,6 +97,13 @@ class SchedulerConfig(StrictModel):
     max_consecutive_errors: int = Field(default=3, strict=True, ge=1, le=20)
 
 
+class ServiceConfig(StrictModel):
+    """Deny-by-default controls for an external managed scheduler service."""
+
+    enabled: bool = False
+    manager: Literal["systemd_user"] = "systemd_user"
+
+
 class ProjectConfig(StrictModel):
     """Complete, validated configuration for one managed project."""
 
@@ -105,6 +112,7 @@ class ProjectConfig(StrictModel):
     intake: IntakeConfig = Field(default_factory=IntakeConfig)
     autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    service: ServiceConfig = Field(default_factory=ServiceConfig)
     commands: CommandConfig
     limits: LimitsConfig
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)

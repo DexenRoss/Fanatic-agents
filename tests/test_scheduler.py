@@ -503,6 +503,32 @@ def test_old_dead_scheduler_lock_is_recovered(tmp_path: Path) -> None:
     assert not lock.exists()
 
 
+def test_scheduler_lock_for_another_repository_is_preserved(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    other_repository = tmp_path / "other-repo"
+    other_repository.mkdir()
+    store = SchedulerStateStore(metadata_root=tmp_path / "meta")
+    lock = store.lock_path(repository)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps(
+        {
+            "pid": 99999999,
+            "timestamp": (NOW - timedelta(hours=2)).isoformat(),
+            "repository": str(other_repository.resolve()),
+        }
+    )
+    lock.write_text(original, encoding="utf-8")
+
+    with pytest.raises(SchedulerLockedError, match="ambiguous"):
+        with store.lock(repository):
+            pass
+
+    assert lock.read_text(encoding="utf-8") == original
+
+
 def test_corrupt_state_is_preserved_and_fails_closed(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
