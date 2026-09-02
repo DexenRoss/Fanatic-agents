@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import signal
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,14 +14,20 @@ from click import unstyle
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from fanatic_agents.autonomous.models import AutonomousRunResult
 from fanatic_agents.cli.main import app
 from fanatic_agents.core.config import ProjectConfig, ServiceConfig
 from fanatic_agents.core.settings import ApplicationSettings
 from fanatic_agents.scheduler.models import SchedulerRunResult
+from fanatic_agents.scheduler.service import SchedulerService
+from fanatic_agents.scheduler.state import SchedulerStateStore
+from fanatic_agents.service import cli as service_cli
+from fanatic_agents.service import manager as manager_module
 from fanatic_agents.service import systemd as systemd_module
 from fanatic_agents.service.manager import (
     ManagedServiceError,
     ManagedServiceManager,
+    render_unit,
     service_name_for,
     sha256_file,
 )
@@ -262,6 +270,48 @@ def test_systemctl_uses_exact_argv_and_never_shell(tmp_path: Path) -> None:
     assert all(item[1]["shell"] is False for item in calls)
 
 
+def test_systemctl_failure_reports_only_bounded_safe_reason(tmp_path: Path) -> None:
+    name = "fanatic-agents-repo-0123456789ab.service"
+    reason = f"Failed to start {name}: Unit has a bad unit file setting."
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", reason + "\n" + "x" * 500)
+
+    manager = SystemdUserManager(
+        runner=runner,
+        systemctl="/usr/bin/systemctl",
+        unit_directory=tmp_path,
+    )
+    with pytest.raises(SystemdUserError) as error:
+        manager.start(name)
+    assert reason in str(error.value)
+    assert "x" * 500 not in str(error.value)
+
+
+def test_systemctl_failure_does_not_expose_secret_bearing_output(
+    tmp_path: Path,
+) -> None:
+    name = "fanatic-agents-repo-0123456789ab.service"
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            "",
+            f"Failed to start {name}: OPENAI_API_KEY={SECRET}\n",
+        )
+
+    manager = SystemdUserManager(
+        runner=runner,
+        systemctl="/usr/bin/systemctl",
+        unit_directory=tmp_path,
+    )
+    with pytest.raises(SystemdUserError) as error:
+        manager.start(name)
+    assert str(error.value) == "systemctl rejected the managed user-service operation."
+    assert SECRET not in str(error.value)
+
+
 def test_unit_writer_refuses_symlink_targets(tmp_path: Path) -> None:
     name = "fanatic-agents-repo-0123456789ab.service"
     foreign = tmp_path / "foreign"
@@ -285,6 +335,67 @@ def test_failed_systemd_state_is_reported(tmp_path: Path) -> None:
     name = "fanatic-agents-repo-0123456789ab.service"
     assert manager.active_state(name) == "failed"
 
+
+def test_render_unit_uses_systemd_syntax_not_shell_quoting() -> None:
+    repository = Path("/home/dexen/Documentos/fanatic-agents-lab")
+    executable = Path("/opt/fanatic-agents/bin/fanatic-agents")
+    receipt = Path("/home/dexen/.local/state/fanatic-agents/receipt.json")
+
+    unit = render_unit(
+        description="Lab scheduler",
+        repository=repository,
+        executable=executable,
+        receipt_path=receipt,
+    )
+
+    assert (
+        "WorkingDirectory=/home/dexen/Documentos/fanatic-agents-lab\n" in unit
+    )
+    assert 'WorkingDirectory="/home/dexen/Documentos/fanatic-agents-lab"' not in unit
+    assert (
+        "ExecStart=/opt/fanatic-agents/bin/fanatic-agents service run-managed "
+        "/home/dexen/.local/state/fanatic-agents/receipt.json\n" in unit
+    )
+    assert "Restart=no" in unit
+    assert SECRET not in unit
+    assert "bash -c" not in unit and "sh -c" not in unit
+    source = inspect.getsource(manager_module)
+    assert "shlex" not in source and "shell=True" not in source
+
+
+def test_render_unit_preserves_working_directory_with_spaces() -> None:
+    repository = Path("/home/dexen/Documentos/fanatic agents lab")
+    unit = render_unit(
+        description="Lab scheduler",
+        repository=repository,
+        executable=Path("/opt/Fanatic Agents/bin/fanatic-agents"),
+        receipt_path=Path("/home/dexen/.local/state/fanatic agents/receipt.json"),
+    )
+
+    working_directory = next(
+        line.removeprefix("WorkingDirectory=")
+        for line in unit.splitlines()
+        if line.startswith("WorkingDirectory=")
+    )
+    assert working_directory == str(repository)
+    assert Path(working_directory).is_absolute()
+    assert (
+        'ExecStart="/opt/Fanatic Agents/bin/fanatic-agents" service run-managed '
+        '"/home/dexen/.local/state/fanatic agents/receipt.json"' in unit
+    )
+
+
+@pytest.mark.parametrize("unsafe", ["/repo\nnext", "/repo\rnext", "/repo\0next"])
+def test_render_unit_rejects_unrepresentable_values(unsafe: str) -> None:
+    with pytest.raises(ManagedServiceError, match="invalid characters"):
+        render_unit(
+            description="Lab scheduler",
+            repository=Path(unsafe),
+            executable=Path("/opt/fanatic-agents"),
+            receipt_path=Path("/var/lib/fanatic-agents/receipt.json"),
+        )
+
+
 def test_install_defaults_are_safe_and_secret_free(tmp_path: Path) -> None:
     manager, systemd, _git, repository, config, executable = setup_manager(tmp_path)
     env_file = tmp_path / ".env"
@@ -296,7 +407,7 @@ def test_install_defaults_are_safe_and_secret_free(tmp_path: Path) -> None:
     unit = Path(receipt.unit_path).read_text(encoding="utf-8")
     receipt_text = manager._receipts.path_for(repository).read_text(encoding="utf-8")
     assert "Restart=no" in unit
-    assert f'ExecStart="{executable.resolve()}"' in unit
+    assert f"ExecStart={executable.resolve()}" in unit
     assert "run-managed" in unit
     assert SECRET not in unit
     assert SECRET not in receipt_text
@@ -491,3 +602,168 @@ def test_service_cli_help_surface_is_stable() -> None:
         result = runner.invoke(app, command)
         assert result.exit_code == 0, result.stdout
         assert "Usage" in unstyle(result.stdout)
+
+
+def test_managed_sigterm_gracefully_stops_and_allows_immediate_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base, systemd, git, repository, config, executable = setup_manager(tmp_path)
+    metadata = tmp_path / "scheduler-metadata"
+    states = SchedulerStateStore(metadata_root=metadata)
+    signal_changes: list[tuple[signal.Signals, object]] = []
+    current_handler: dict[str, object] = {"value": signal.SIG_IGN}
+    lock_observations: list[bool] = []
+
+    class NoTaskRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_once(
+            self, _config: ProjectConfig, **kwargs: object
+        ) -> AutonomousRunResult:
+            self.calls += 1
+            managed_repository = Path(str(kwargs["repository"]))
+            return AutonomousRunResult(
+                repository=str(managed_repository),
+                github_repository="owner/repo",
+                started_at=NOW,
+                finished_at=NOW,
+                status="no_eligible_tasks",
+            )
+
+    runner = NoTaskRunner()
+
+    def get_signal(_signum: signal.Signals) -> object:
+        return current_handler["value"]
+
+    def set_signal(signum: signal.Signals, handler: object) -> object:
+        previous = current_handler["value"]
+        current_handler["value"] = handler
+        signal_changes.append((signum, handler))
+        return previous
+
+    def interrupt_managed_sleep(_seconds: float) -> None:
+        lock_observations.append(states.lock_path(repository).exists())
+        handler = current_handler["value"]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(manager_module.signal, "getsignal", get_signal)
+    monkeypatch.setattr(manager_module.signal, "signal", set_signal)
+    scheduler = SchedulerService(
+        runner=runner,  # type: ignore[arg-type]
+        metadata_root=metadata,
+        sleeper=interrupt_managed_sleep,
+        clock=lambda: NOW,
+    )
+    manager = ManagedServiceManager(
+        systemd=systemd,  # type: ignore[arg-type]
+        receipts=base._receipts,
+        git=git,  # type: ignore[arg-type]
+        scheduler_factory=lambda: scheduler,
+        settings_loader=lambda **_kwargs: ApplicationSettings(
+            OPENAI_API_KEY=SECRET, _env_file=None
+        ),
+        provider_configurer=lambda _settings: True,
+        clock=lambda: NOW,
+    )
+    receipt = install(manager, repository, config, executable)
+    receipt_path = manager._receipts.path_for(repository)
+    assert receipt_path == manager._receipts.path_for(Path(receipt.repository))
+    monkeypatch.setattr(service_cli, "ManagedServiceManager", lambda: manager)
+    cli = CliRunner()
+
+    for _attempt in range(2):
+        result = cli.invoke(
+            app, ["service", "run-managed", str(receipt_path)]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert "Final status: STOPPED_BY_USER" in unstyle(result.stdout)
+        assert not states.lock_path(repository).exists()
+        assert states.load(repository).last_result_status == "stopped_by_user"
+
+    assert runner.calls == 2
+    assert lock_observations == [True, True]
+    assert current_handler["value"] is signal.SIG_IGN
+    assert len(signal_changes) == 4
+    assert all(signum is signal.SIGTERM for signum, _handler in signal_changes)
+    assert signal_changes[1][1] is signal.SIG_IGN
+    assert signal_changes[3][1] is signal.SIG_IGN
+
+
+def test_managed_run_does_not_install_signal_handler_from_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base, systemd, git, repository, config, executable = setup_manager(tmp_path)
+    scheduler = FakeScheduler()
+    manager = ManagedServiceManager(
+        systemd=systemd,  # type: ignore[arg-type]
+        receipts=base._receipts,
+        git=git,  # type: ignore[arg-type]
+        scheduler_factory=lambda: scheduler,  # type: ignore[arg-type]
+        settings_loader=lambda **_kwargs: ApplicationSettings(
+            OPENAI_API_KEY=SECRET, _env_file=None
+        ),
+        provider_configurer=lambda _settings: True,
+        clock=lambda: NOW,
+    )
+    install(manager, repository, config, executable)
+    receipt_path = manager._receipts.path_for(repository)
+    signal_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        manager_module.signal,
+        "getsignal",
+        lambda *args: signal_calls.append(args),
+    )
+    monkeypatch.setattr(
+        manager_module.signal,
+        "signal",
+        lambda *args: signal_calls.append(args),
+    )
+    results: list[SchedulerRunResult] = []
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            results.append(manager.run_managed(receipt_path))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert [result.status for result in results] == ["stopped_by_user"]
+    assert signal_calls == []
+
+
+def test_start_and_stop_preserve_scheduler_lock_and_signal_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager, _systemd, _git, repository, config, executable = setup_manager(tmp_path)
+    install(manager, repository, config, executable)
+    states = SchedulerStateStore(metadata_root=tmp_path / "metadata")
+    lock_path = states.lock_path(repository)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("preserve-existing-lock", encoding="utf-8")
+    signal_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        manager_module.signal,
+        "signal",
+        lambda *args: signal_calls.append(args),
+    )
+    monkeypatch.setattr(service_cli, "ManagedServiceManager", lambda: manager)
+    cli = CliRunner()
+
+    start_result = cli.invoke(app, ["service", "start", str(repository)])
+    stop_result = cli.invoke(app, ["service", "stop", str(repository)])
+
+    assert start_result.exit_code == 0, start_result.stdout
+    assert stop_result.exit_code == 0, stop_result.stdout
+    assert lock_path.read_text(encoding="utf-8") == "preserve-existing-lock"
+    assert signal_calls == []

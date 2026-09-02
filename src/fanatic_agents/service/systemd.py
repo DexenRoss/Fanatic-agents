@@ -15,7 +15,16 @@ from fanatic_agents.service.models import PlatformCheck
 from fanatic_agents.service.receipt import ServiceReceiptError, atomic_write
 
 UNIT_NAME = re.compile(r"^fanatic-agents-[a-z0-9-]+-[0-9a-f]{12}\.service$")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+SAFE_SYSTEMCTL_REASON = re.compile(
+    r"^(?:Failed to |Job for |Unit |Failed to connect to bus:)", re.IGNORECASE
+)
+SENSITIVE_OUTPUT = re.compile(
+    r"(?:api[_-]?key|authorization|bearer|credential|password|secret|token)",
+    re.IGNORECASE,
+)
 COMMAND_TIMEOUT_SECONDS = 20.0
+MAX_FAILURE_REASON_LENGTH = 240
 
 
 class SystemdUserError(RuntimeError):
@@ -188,6 +197,12 @@ class SystemdUserManager:
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             raise SystemdUserError("systemctl could not complete safely.") from exc
         if check_result and result.returncode != 0:
+            reason = _safe_failure_reason(result)
+            if reason is not None:
+                raise SystemdUserError(
+                    "systemctl rejected the managed user-service operation. "
+                    f"Reason: {reason}"
+                )
             raise SystemdUserError("systemctl rejected the managed user-service operation.")
         return result
 
@@ -195,6 +210,19 @@ class SystemdUserManager:
 def _validate_unit_name(service_name: str) -> None:
     if not UNIT_NAME.fullmatch(service_name):
         raise SystemdUserError("Managed systemd unit name is invalid.")
+
+
+def _safe_failure_reason(result: subprocess.CompletedProcess[str]) -> str | None:
+    """Return one bounded, low-risk systemctl diagnostic line when available."""
+    for output in (result.stderr, result.stdout):
+        for line in output.splitlines():
+            reason = " ".join(ANSI_ESCAPE.sub("", line).split())
+            if not reason or not SAFE_SYSTEMCTL_REASON.match(reason):
+                continue
+            if SENSITIVE_OUTPUT.search(reason):
+                return None
+            return reason[:MAX_FAILURE_REASON_LENGTH]
+    return None
 
 
 def _systemd_available() -> bool:

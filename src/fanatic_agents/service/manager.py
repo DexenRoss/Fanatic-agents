@@ -6,18 +6,19 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import stat
 import sys
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 
 from pydantic import ValidationError
 
-from fanatic_agents.agents._shared import (
-    OpenAIConfigurationError,
-    configure_openai_sdk,
-)
+from fanatic_agents.agents._shared import OpenAIConfigurationError, configure_openai_sdk
 from fanatic_agents.core.config import (
     ConfigLoadError,
     ProjectConfig,
@@ -241,12 +242,13 @@ class ManagedServiceManager:
             raise ManagedServiceError(
                 "Managed scheduler provider setup failed safely."
             ) from exc
-        return self._scheduler_factory().run_forever(
-            config,
-            image=receipt.image,
-            repository=Path(receipt.repository),
-            deliver=receipt.deliver_authorized,
-        )
+        with _managed_sigterm_as_keyboard_interrupt():
+            return self._scheduler_factory().run_forever(
+                config,
+                image=receipt.image,
+                repository=Path(receipt.repository),
+                deliver=receipt.deliver_authorized,
+            )
 
     def _validate_runtime(
         self,
@@ -351,18 +353,24 @@ def render_unit(
     executable: Path,
     receipt_path: Path,
 ) -> str:
+    if not repository.is_absolute():
+        raise ManagedServiceError("Managed service repository path must be absolute.")
+    if not executable.is_absolute() or not receipt_path.is_absolute():
+        raise ManagedServiceError("Managed unit command paths must be absolute.")
+    _validate_systemd_value(description)
     label = " ".join(description.split()).replace("\\", "-")[:120]
     command = " ".join(
-        _systemd_quote(str(value))
+        _systemd_exec_argument(str(value))
         for value in (executable, "service", "run-managed", receipt_path)
     )
     return (
         "[Unit]\n"
-        f"Description=Fanatic Agents scheduler for {label}\n"
+        "Description="
+        f"{_systemd_directive_value(f'Fanatic Agents scheduler for {label}')}\n"
         "After=default.target\n\n"
         "[Service]\n"
         "Type=simple\n"
-        f"WorkingDirectory={_systemd_quote(str(repository))}\n"
+        f"WorkingDirectory={_systemd_directive_value(str(repository))}\n"
         f"ExecStart={command}\n"
         "Restart=no\n\n"
         "[Install]\n"
@@ -493,12 +501,49 @@ def _safe_env_file(path: Path) -> Path:
     return resolved
 
 
-def _systemd_quote(value: str) -> str:
-    if any(character in value for character in ("\n", "\r", "\0")):
-        raise ManagedServiceError("Managed unit arguments contain invalid characters.")
+@contextmanager
+def _managed_sigterm_as_keyboard_interrupt() -> Iterator[None]:
+    """Give only a main-thread managed run the scheduler's graceful stop path."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def stop_gracefully(_signum: int, _frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_gracefully)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _systemd_directive_value(value: str) -> str:
+    """Serialize one scalar unit value without applying argv or shell quoting."""
+    _validate_systemd_value(value)
+    if not value or value != value.strip() or "\\" in value:
+        raise ManagedServiceError("Managed unit value cannot be represented safely.")
+    return value.replace("%", "%%")
+
+
+def _systemd_exec_argument(value: str) -> str:
+    """Serialize one argument according to systemd's ExecStart parser."""
+    _validate_systemd_value(value)
     escaped = (
         value.replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("%", "%%")
+        .replace("$", "$$")
     )
-    return '"' + escaped + '"'
+    if not value or any(character.isspace() for character in value) or any(
+        character in value for character in ('"', "'", "\\")
+    ):
+        return f'"{escaped}"'
+    return escaped
+
+
+def _validate_systemd_value(value: str) -> None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ManagedServiceError("Managed unit values contain invalid characters.")
