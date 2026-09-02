@@ -2,6 +2,65 @@
 
 Fanatic Agents es una plataforma experimental para orquestar agentes de IA especializados con permisos explícitos, autonomía limitada y entrega de cambios para revisión humana.
 
+## ¿Cómo puedo usar este proyecto?
+
+El flujo normal de Fanatic Agents parte de una **Issue de GitHub autorizada por una persona**. Fanatic Agents no inventa ni se autoriza trabajo por sí mismo: tú creas la Issue, le agregas la etiqueta `fanatic:ready` y el scheduler puede tomarla cuando no exista otra tarea activa.
+
+```text
+Tú creas una Issue
+  -> agregas fanatic:ready
+  -> Fanatic Agents la selecciona
+  -> Planner -> Developer -> Reviewer -> QA -> Implementation
+  -> verificación en Docker
+  -> branch + commit + push + Pull Request, si delivery está autorizado
+  -> tú revisas y haces merge
+  -> Fanatic Agents detecta MERGED_EXTERNALLY
+```
+
+### Crear la Issue desde GitHub
+
+1. Entra al repositorio que quieres que Fanatic Agents administre.
+2. Abre **Issues** y selecciona **New issue**.
+3. Escribe un título concreto y un body que describa qué debe cambiar y, de ser posible, qué comportamiento esperas verificar.
+4. En **Labels**, agrega `fanatic:ready`.
+5. Opcionalmente agrega una sola prioridad: `priority:p0`, `priority:p1`, `priority:p2` o `priority:p3`. `p0` tiene mayor prioridad.
+6. No agregues `fanatic:blocked` ni `fanatic:manual` si quieres que la tarea pueda ser seleccionada automáticamente.
+7. Crea la Issue.
+
+Si el repositorio todavía no tiene la etiqueta `fanatic:ready`, puedes crearla una sola vez desde **Issues -> Labels**, o con GitHub CLI:
+
+```bash
+gh label create "fanatic:ready" \
+  --repo OWNER/REPO \
+  --description "Autoriza a Fanatic Agents a considerar esta Issue"
+```
+
+También puedes crear directamente una Issue autorizada desde la terminal:
+
+```bash
+gh issue create \
+  --repo OWNER/REPO \
+  --title "Add validation to calculator input" \
+  --body "Validate invalid calculator input and add test coverage. Existing behavior must remain unchanged." \
+  --label "fanatic:ready,priority:p1"
+```
+
+Si usas el servicio administrado de Sprint 11, comprueba que esté activo:
+
+```bash
+fanatic-agents service status /ruta/al/repositorio
+```
+
+Si ya está instalado pero detenido:
+
+```bash
+fanatic-agents service start /ruta/al/repositorio
+```
+
+Cuando el servicio y el scheduler estén autorizados por la configuración, Fanatic Agents descubrirá la Issue en un ciclo posterior. Sólo puede trabajar en una tarea activa por repositorio a la vez. Una Issue con `fanatic:blocked` o `fanatic:manual`, sin `fanatic:ready`, o con metadata local terminal no será seleccionada automáticamente.
+
+Fanatic Agents **no hace merge automático ni modifica la Issue**. Cuando cree un Pull Request, la revisión y el merge siguen siendo humanos. Después del merge, el scheduler lo reconcilia como `MERGED_EXTERNALLY`. La Issue puede seguir abierta y conservar `fanatic:ready`; los receipts locales terminales evitan que la misma tarea sea seleccionada otra vez.
+
 
 ## Requisitos
 
@@ -592,95 +651,107 @@ indefinidamente una decision humana y `MERGED_EXTERNALLY` solo reconcilia los
 receipts. El estado y el lock `.scheduler.lock` son atomicos, externos al
 repositorio y separados de `.autonomous.lock`.
 
-## Managed Background Service (Sprint 11)
+## Servicio administrado en segundo plano (Sprint 11)
 
-Sprint 11 adds a management layer around the existing scheduler. It does not
-implement a second scheduler or bypass any Sprint 0-10 safety gate:
+Sprint 11 añade una capa de administración sobre el scheduler existente. No
+implementa un segundo scheduler ni omite ninguno de los gates de seguridad de
+los Sprints 0-10:
 
 ```text
-Human creates Issue
+Humano crea Issue
   -> fanatic:ready
-  -> systemd user service
+  -> servicio de usuario systemd
   -> SchedulerService.run_forever()
   -> AutonomousRunner
   -> Pull Request
-  -> Human merge
-  -> Scheduler reconciliation
+  -> merge humano
+  -> reconciliación del scheduler
 ```
 
-The only supported manager in this sprint is `systemd --user` on Linux, or
-inside a WSL distribution where systemd and the user manager are available.
-The platform check is read-only and does not install, enable, or start anything:
+El único administrador soportado en este sprint es `systemd --user` en Linux,
+o dentro de una distribución WSL donde systemd y el administrador de usuario
+estén disponibles. La comprobación de plataforma es de solo lectura y no
+instala, habilita ni inicia nada:
 
 ```bash
 fanatic-agents service check
 ```
 
-Managed operation is disabled by default and requires four independent config
-gates: `service.enabled`, `scheduler.enabled`, `autonomy.enabled`, and
-`intake.enabled`, plus the existing permissions.
+La operación administrada está deshabilitada por defecto y requiere cuatro
+gates de configuración independientes: `service.enabled`,
+`scheduler.enabled`, `autonomy.enabled` e `intake.enabled`, además de los
+permisos existentes.
 
-Installation is explicit. It writes one deterministic unit under
-`~/.config/systemd/user/` (or the XDG equivalent), and a private receipt under
-the external `.fanatic-agents-worktrees/.metadata/service/` namespace:
+La instalación es explícita. Escribe un unit determinístico bajo
+`~/.config/systemd/user/` (o el equivalente XDG) y un receipt privado bajo el
+namespace externo `.fanatic-agents-worktrees/.metadata/service/`:
 
 ```bash
-fanatic-agents service install /absolute/repository/path \
-  --config /absolute/project.yaml \
+fanatic-agents service install /ruta/absoluta/al/repositorio \
+  --config /ruta/absoluta/proyecto.yaml \
   --image python:3.12-slim
 ```
 
-Install does **not** enable or start the service by default. Each action needs a
-separate human flag:
+La instalación **no habilita ni inicia el servicio por defecto**. Cada acción
+requiere un flag humano independiente:
 
 ```bash
-fanatic-agents service install /absolute/repository/path \
-  --config /absolute/project.yaml \
+fanatic-agents service install /ruta/absoluta/al/repositorio \
+  --config /ruta/absoluta/proyecto.yaml \
   --image python:3.12-slim \
   --enable \
   --start
 ```
 
-Persistent delivery consent remains separate: add `--deliver` only when
+El consentimiento persistente para delivery permanece separado: añade
+`--deliver` únicamente cuando también estén habilitados
 `autonomy.auto_deliver`, `permissions.commit`,
-`permissions.push_branch`, and `permissions.create_pull_request` are also
-enabled. This never authorizes automatic merge or deployment.
+`permissions.push_branch` y `permissions.create_pull_request`. Esto nunca
+autoriza merge automático ni deployment.
 
-Lifecycle operations target only the exact unit recorded in the receipt:
+Las operaciones del ciclo de vida actúan únicamente sobre el unit exacto
+registrado en el receipt:
 
 ```bash
-fanatic-agents service start /absolute/repository/path
-fanatic-agents service stop /absolute/repository/path
-fanatic-agents service status /absolute/repository/path
-fanatic-agents service uninstall /absolute/repository/path
+fanatic-agents service start /ruta/absoluta/al/repositorio
+fanatic-agents service stop /ruta/absoluta/al/repositorio
+fanatic-agents service status /ruta/absoluta/al/repositorio
+fanatic-agents service uninstall /ruta/absoluta/al/repositorio
 ```
 
-A repeated install is rejected unless `--replace` is explicit, and replacement
-is allowed only for the previously validated Fanatic Agents unit. Stop and
-uninstall do not modify Issue, PR, branch, worktree, or task lifecycle receipts;
-a task such as `waiting_for_review` remains available for later reconciliation.
+Una instalación repetida se rechaza salvo que `--replace` sea explícito, y el
+reemplazo únicamente se permite para el unit de Fanatic Agents previamente
+validado. `stop` y `uninstall` no modifican Issues, Pull Requests, ramas,
+worktrees ni receipts del ciclo de vida de tareas; una tarea como
+`waiting_for_review` permanece disponible para una reconciliación posterior.
 
-The unit invokes the absolute Fanatic Agents executable through the private
-`service run-managed` boundary. Before scheduling, that boundary validates the
-receipt, repository path and GitHub origin, configured main branch, executable,
-unit hash, and SHA-256 of the exact YAML file. Any config or unit change fails
-closed; reinstall with `--replace` is the explicit way to accept a new config.
-The unit always contains `Restart=no`, so a security failure, invalid config,
-ambiguous metadata, or `TOO_MANY_CONSECUTIVE_ERRORS` remains stopped until a
-human acts.
+El unit invoca la ruta absoluta del ejecutable de Fanatic Agents mediante el
+boundary privado `service run-managed`. Antes de iniciar el scheduler, este
+boundary valida el receipt, la ruta del repositorio y su origen GitHub, la rama
+principal configurada, el ejecutable, el hash del unit y el SHA-256 del archivo
+YAML exacto. Cualquier cambio en la configuración o en el unit falla cerrado;
+reinstalar con `--replace` es la forma explícita de aceptar una nueva
+configuración.
 
-Secrets are never copied into the unit, receipt, CLI arguments, or logs. An
-optional `--env-file /absolute/private.env` stores only the path. The file must
-be a regular non-symlink file, owned by the current user where ownership can be
-checked, and not world-readable. Process environment variables retain their
-normal precedence.
+El unit siempre contiene `Restart=no`, por lo que un fallo de seguridad, una
+configuración inválida, metadata ambigua o `TOO_MANY_CONSECUTIVE_ERRORS`
+permanece detenido hasta que intervenga una persona.
 
-Linux user services can start as part of the applicable user-manager session.
-Under WSL, systemd manages the service only while that distribution and user
-manager exist. Sprint 11 does **not** start WSL automatically at Windows boot
-and does not install Windows Task Scheduler, a Windows Service, linger, cron,
-launchd, a system service, or any root-level unit.
+Los secretos nunca se copian al unit, al receipt, a los argumentos de CLI ni a
+los logs. El argumento opcional `--env-file /ruta/absoluta/private.env` guarda
+únicamente la ruta. El archivo debe ser regular, no ser symlink, pertenecer al
+usuario actual cuando sea posible comprobar la propiedad y no ser legible por
+otros usuarios. Las variables del entorno del proceso conservan su precedencia
+normal.
 
-All earlier safeguards remain unchanged: humans create Issues and merge PRs;
-there is no Issue mutation, automatic retry, automatic systemd restart,
-automatic merge, or deployment.
+Los servicios de usuario de Linux pueden iniciar como parte de la sesión
+correspondiente del administrador de usuario. Bajo WSL, systemd administra el
+servicio únicamente mientras la distribución y su administrador de usuario
+estén activos. Sprint 11 **no inicia automáticamente WSL al arrancar Windows**
+y tampoco instala Windows Task Scheduler, Windows Service, `linger`, cron,
+launchd, un servicio del sistema ni ningún unit con privilegios root.
+
+Todas las protecciones anteriores permanecen sin cambios: las personas crean
+las Issues y hacen merge de los Pull Requests; no existe modificación de
+Issues, retry automático, reinicio automático de systemd, merge automático ni
+deployment.
